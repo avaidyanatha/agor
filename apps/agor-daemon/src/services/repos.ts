@@ -9,6 +9,7 @@
  * metadata only.
  */
 
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import {
   ensureBranchStorageModeAllowed,
@@ -65,6 +66,38 @@ export type RepoParams = QueryParams<{
   managed_by_agor?: boolean;
   cleanup?: boolean; // For delete operations: true = delete filesystem, false = database only
 }>;
+
+/**
+ * A branch working directory is "usable" if it exists and carries git metadata
+ * (`.git` file for a worktree, `.git` dir for a clone). Cheap daemon-side check
+ * used by provisioning reconciliation to recognize a materialized checkout
+ * without shelling out to the executor. Deliberately conservative: it only ever
+ * causes a `creating`→`ready` recovery for a directory that already looks like
+ * a checkout; it never creates, mutates, or deletes anything.
+ */
+function isValidBranchCheckout(branchPath: string | undefined | null): boolean {
+  if (!branchPath) return false;
+  try {
+    return existsSync(branchPath) && existsSync(path.join(branchPath, '.git'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Reduce an error to a short, log/DB-safe message. Strips embedded credentials
+ * from any remote URLs the underlying git error may have echoed back, so
+ * persisted `error_message` values and logs never leak secrets. Callers are
+ * responsible for not passing absolute user paths into user-facing copy.
+ */
+function sanitizeProvisioningError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  try {
+    return redactGitUrlCredentials(raw);
+  } catch {
+    return raw;
+  }
+}
 
 function deriveLocalRepoSlug(remoteUrl: string | undefined, explicitSlug?: string): RepoSlug {
   if (explicitSlug) {
@@ -890,16 +923,48 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       );
     }
 
-    // Fire-and-forget: spawn executor to create git branch on filesystem.
-    // Executor will patch filesystem_status to 'ready' when done (or 'failed'
-    // on error), and along the way render environment command templates
-    // (start_command, stop_command, etc.) onto the branch. Those fields
-    // trip the requireAdminForEnvConfig hook on patch, so we authenticate
-    // the executor with a service JWT to bypass admin checks for internal
-    // materialization of admin-defined templates.
-    //
-    // Per-user credentials: Feathers RPC (users.getGitEnvironment)
-    // Unix permissions: fail-closed inside the tenant-mounted lifecycle executor.
+    // Spawn executor to materialize the git branch on the filesystem. The
+    // executor patches filesystem_status to 'ready' when done (or 'failed' on
+    // error) and renders environment command templates along the way. Because
+    // this is fire-and-forget, `dispatchBranchProvisioning` installs an
+    // onExit safety net that transitions the branch out of 'creating' even
+    // when the executor process dies before it can patch the row (crash,
+    // SIGTERM on daemon restart, lost daemon connection). Without that net a
+    // failed materialization leaves the branch stuck in 'creating' forever.
+    await this.dispatchBranchProvisioning(branch, repo, userId, params, 'create');
+
+    // Return immediately with 'creating' status - UI will see updates via WebSocket
+    return branch;
+  }
+
+  /**
+   * Spawn the `git.branch.add` executor that materializes a branch's working
+   * directory, with a daemon-side safety net so the branch never gets stuck in
+   * `filesystem_status='creating'`.
+   *
+   * The executor itself patches `ready`/`failed` when it can, but it can only
+   * do so if its own error handler runs AND it still holds a daemon
+   * connection. When the process is killed or crashes first (SIGTERM on a
+   * watch restart, OOM, a startup crash, or a dropped socket) nothing would
+   * otherwise transition the row. The `onExit` net below re-reads the branch
+   * after the process exits and, if it is still `creating`, reconciles it:
+   * a valid checkout on disk becomes `ready` (the executor did the work but
+   * died before acking), otherwise it becomes `failed` with a sanitized,
+   * actionable message. Mirrors the repo-clone safety net (`create()` above).
+   *
+   * Idempotent and reusable: `retryBranchProvisioning()` and the startup
+   * watchdog call this for existing rows too. Structured logs are emitted at
+   * enqueue / exit / reconcile so the lifecycle is traceable.
+   */
+  private async dispatchBranchProvisioning(
+    branch: Branch,
+    repo: Repo,
+    userId: UserID,
+    params: RepoParams | undefined,
+    reason: 'create' | 'retry' | 'reconcile'
+  ): Promise<void> {
+    const storageMode = branch.storage_mode ?? 'worktree';
+    const logPrefix = `[branch-provisioning ${shortId(branch.branch_id)}]`;
     try {
       const sessionToken = generateScopedServiceToken(
         this.app as unknown as { settings: { authentication?: { secret?: string } } },
@@ -915,8 +980,11 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       // identity. In strict mode the requesting user can read an initialized
       // branch through its group/ACL, but cannot create a child beneath the
       // daemon-owned worktree root or mutate the base repo's .git/worktrees.
-      // Keep resolveExecutorReadAsUser for read/probe commands only.
       const asUser = await resolveGitImpersonationForUser(this.db, userId);
+
+      console.log(
+        `${logPrefix} enqueue git.branch.add (reason=${reason}, storage_mode=${storageMode})`
+      );
 
       spawnExecutorFireAndForget(
         {
@@ -936,19 +1004,189 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
           },
         },
         {
-          logPrefix: `[ReposService.createBranch ${data.name}]`,
+          logPrefix,
           asUser, // Run as lifecycle identity with fresh supplemental groups
+          onExit: (code) => {
+            if (code === 0) {
+              // Success path: the executor patched 'ready' itself.
+              console.log(`${logPrefix} executor exited cleanly (code 0)`);
+              return;
+            }
+            console.error(
+              `${logPrefix} executor exited with code ${code ?? 'null'}; running safety-net reconcile`
+            );
+            void this.reconcileBranchFilesystemAfterExit(branch.branch_id, code);
+          },
         }
       );
     } catch (error) {
-      console.error(
-        '[ReposService.createBranch] Failed to spawn executor:',
-        error instanceof Error ? error.message : String(error)
+      // Synchronous spawn failure (e.g. token generation, impersonation
+      // resolution, or the executor binary is missing). Fire-and-forget means
+      // there is no process to emit onExit, so mark the branch failed here or
+      // it would be stuck in 'creating' with no signal at all.
+      const message = sanitizeProvisioningError(error);
+      console.error(`${logPrefix} failed to spawn executor: ${message}`);
+      await this.markBranchProvisioningFailedIfStuck(
+        branch.branch_id,
+        `Failed to start branch provisioning: ${message}`
       );
     }
+  }
 
-    // Return immediately with 'creating' status - UI will see updates via WebSocket
-    return branch;
+  /**
+   * onExit reconcile: after a non-zero executor exit, either recover the
+   * branch to 'ready' (a valid checkout exists on disk — the executor did the
+   * work but died before acking) or mark it 'failed'. Only acts while the row
+   * is still 'creating' so it never clobbers a richer status the executor
+   * already wrote. Never deletes refs or directories.
+   */
+  private async reconcileBranchFilesystemAfterExit(
+    branchId: string,
+    code: number | null
+  ): Promise<void> {
+    const branchesService = this.app.service('branches');
+    const logPrefix = `[branch-provisioning ${shortId(branchId)}]`;
+    try {
+      const current = (await branchesService.get(branchId)) as Branch;
+      if (current.filesystem_status !== 'creating') {
+        // Executor already reported a terminal status — nothing to do.
+        return;
+      }
+      if (isValidBranchCheckout(current.path)) {
+        console.log(`${logPrefix} reconcile → ready (valid checkout found on disk after exit)`);
+        await branchesService.patch(branchId, { filesystem_status: 'ready' });
+        return;
+      }
+      console.warn(`${logPrefix} reconcile → failed (no usable checkout after executor exit)`);
+      await branchesService.patch(branchId, {
+        filesystem_status: 'failed',
+        error_message: `Branch provisioning did not complete: the materialization process exited with code ${code ?? 'unknown'} before creating a usable working directory. Retry provisioning to try again.`,
+      });
+    } catch (error) {
+      console.error(
+        `${logPrefix} safety-net reconcile failed: ${sanitizeProvisioningError(error)}`
+      );
+    }
+  }
+
+  /** Patch a branch to 'failed' only if it is still 'creating' (idempotent, non-clobbering). */
+  private async markBranchProvisioningFailedIfStuck(
+    branchId: string,
+    message: string
+  ): Promise<void> {
+    const branchesService = this.app.service('branches');
+    try {
+      const current = (await branchesService.get(branchId)) as Branch;
+      if (current.filesystem_status !== 'creating') return;
+      await branchesService.patch(branchId, {
+        filesystem_status: 'failed',
+        error_message: message,
+      });
+    } catch (error) {
+      console.error(
+        `[branch-provisioning ${shortId(branchId)}] failed to mark stuck branch failed: ${sanitizeProvisioningError(error)}`
+      );
+    }
+  }
+
+  /**
+   * Safe, idempotent repair for a branch whose filesystem provisioning is
+   * stuck in 'creating' or landed in 'failed'. Non-destructive:
+   * - If a valid checkout already exists on disk, just mark it 'ready'
+   *   (reconciles a manually materialized directory or an executor that died
+   *   after doing the work but before acking).
+   * - Otherwise flip the row back to 'creating', clear the stale error, and
+   *   re-dispatch the git.branch.add executor (with the onExit safety net).
+   *
+   * The underlying `git worktree add` / clone refuses to clobber an existing
+   * ref or directory, so repeated retries never produce duplicate refs or
+   * directories. Refs and worktrees are never deleted here.
+   */
+  async retryBranchProvisioning(branchId: string, params?: RepoParams): Promise<Branch> {
+    const branchesService = this.app.service('branches');
+    const branch = (await branchesService.get(branchId, params)) as Branch;
+
+    if (branch.filesystem_status === 'ready') {
+      return branch;
+    }
+
+    if (isValidBranchCheckout(branch.path)) {
+      console.log(
+        `[branch-provisioning ${shortId(branchId)}] repair → ready (existing checkout reconciled)`
+      );
+      return (await branchesService.patch(
+        branchId,
+        { filesystem_status: 'ready', error_message: '' },
+        params
+      )) as Branch;
+    }
+
+    const repo = await this.repoRepo.findById(branch.repo_id);
+    if (!repo) {
+      throw new BadRequest(`Repo ${branch.repo_id} not found for branch ${branchId}`);
+    }
+
+    // Provision as the branch's original owner so impersonation/credentials
+    // match the create path.
+    const userId = branch.created_by as UserID;
+    const creating = (await branchesService.patch(
+      branchId,
+      { filesystem_status: 'creating', error_message: '' },
+      params
+    )) as Branch;
+    await this.dispatchBranchProvisioning(creating, repo, userId, params, 'retry');
+    return creating;
+  }
+
+  /**
+   * Startup/watchdog reconciliation for branches left in 'creating' — e.g. the
+   * daemon (and its fire-and-forget executors) was killed mid-provision. For
+   * each such branch: recover to 'ready' if a valid checkout exists, otherwise
+   * re-dispatch provisioning. Never deletes user worktrees or refs. Returns a
+   * summary for logging. Safe to run on every boot (idempotent).
+   */
+  async reconcileStuckCreatingBranches(
+    params?: RepoParams
+  ): Promise<{ scanned: number; recovered: number; retried: number; failed: number }> {
+    const branchesService = this.app.service('branches');
+    const result = (await branchesService.find({
+      query: { $limit: 5000 },
+      paginate: false,
+      ...params,
+    })) as Branch[] | { data: Branch[] };
+    const all = Array.isArray(result) ? result : result.data;
+    // Filter in memory: `filesystem_status` is a real column but the generic
+    // service find does not guarantee arbitrary-column pushdown, so don't rely
+    // on the query narrowing it for us.
+    const stuck = all.filter((branch) => branch.filesystem_status === 'creating');
+
+    const summary = { scanned: stuck.length, recovered: 0, retried: 0, failed: 0 };
+    for (const branch of stuck) {
+      try {
+        if (isValidBranchCheckout(branch.path)) {
+          await branchesService.patch(branch.branch_id, { filesystem_status: 'ready' });
+          summary.recovered++;
+          console.log(
+            `[branch-provisioning ${shortId(branch.branch_id)}] watchdog → ready (checkout present)`
+          );
+          continue;
+        }
+        await this.retryBranchProvisioning(branch.branch_id);
+        summary.retried++;
+      } catch (error) {
+        summary.failed++;
+        await this.markBranchProvisioningFailedIfStuck(
+          branch.branch_id,
+          `Provisioning could not be recovered after restart: ${sanitizeProvisioningError(error)}`
+        );
+      }
+    }
+    if (summary.scanned > 0) {
+      console.log(
+        `[branch-provisioning] watchdog: scanned=${summary.scanned} recovered=${summary.recovered} retried=${summary.retried} failed=${summary.failed}`
+      );
+    }
+    return summary;
   }
 
   /**
