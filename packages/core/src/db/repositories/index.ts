@@ -24,6 +24,7 @@ export * from './knowledge';
 export * from './knowledge-embedding-work';
 export * from './knowledge-semantic-settings';
 export * from './mcp-catalog';
+export * from './mcp-member-policy';
 export * from './mcp-oauth-pending-flows';
 export * from './mcp-servers';
 export * from './messages';
