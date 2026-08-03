@@ -607,7 +607,7 @@ export const EnvironmentLifecyclePayloadSchema = BasePayloadSchema.extend({
       branchPath: z.string().optional(),
 
       /** Lifecycle action */
-      action: z.enum(['start', 'stop', 'restart', 'nuke']),
+      action: z.enum(['start', 'stop', 'restart', 'nuke', 'sync']),
 
       /** Shell start command. Required for start/restart. */
       startCommand: z.string().optional(),
@@ -617,6 +617,10 @@ export const EnvironmentLifecyclePayloadSchema = BasePayloadSchema.extend({
 
       /** Shell nuke command. Required for nuke. */
       nukeCommand: z.string().optional(),
+
+      /** Shell sync command. Required for sync. Pushes the branch's latest code
+       *  into the running remote environment (see RepoEnvironmentVariant.sync). */
+      syncCommand: z.string().optional(),
 
       /** Static app URL rendered by the daemon/branch snapshot. */
       appUrl: z.string().optional(),
