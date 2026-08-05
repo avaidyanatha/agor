@@ -38,6 +38,20 @@ let currentPtyCols = 160;
 let currentPtyRows = 40;
 
 /**
+ * Return a short, per-user socket base unless the operator supplied one.
+ *
+ * Zellij uses an explicit ZELLIJ_SOCKET_DIR directly (apart from its protocol
+ * version directory), so the fallback itself must include the Unix uid.
+ */
+export function getZellijSocketDir(socketDir: string | undefined, uid: number | undefined): string {
+  if (socketDir !== undefined) return socketDir;
+  if (uid === undefined) {
+    throw new Error('Cannot choose a per-user Zellij socket directory without a Unix uid');
+  }
+  return `/tmp/agor-zellij-${uid}`;
+}
+
+/**
  * Handle zellij.attach command
  *
  * Spawns PTY with zellij attach and streams I/O over Feathers channel.
@@ -168,15 +182,9 @@ export async function handleZellijAttach(
         HOME: actualHome, // Ensure Zellij uses correct home for cache/config
         XDG_CACHE_HOME: `${actualHome}/.cache`, // Explicit cache dir
         XDG_CONFIG_HOME: `${actualHome}/.config`, // Explicit config dir
-        // Force a short IPC socket directory. Zellij places its Unix-domain
-        // control socket at `$ZELLIJ_SOCKET_DIR/zellij-<uid>/<version>/<session>`,
-        // which must stay under the OS ~103-byte sun_path limit. On macOS the
-        // default $TMPDIR is a long `/var/folders/...` path, and our session
-        // names are `agor-<24-char-user-id>`, so the default socket path
-        // overflows and zellij exits 1 immediately ("IPC socket path is too
-        // long"). A short, fixed dir keeps the path well under the limit on
-        // every platform (per-uid `zellij-<uid>` subdir preserves isolation).
-        ZELLIJ_SOCKET_DIR: cleanEnv.ZELLIJ_SOCKET_DIR || '/tmp/zellij',
+        // Zellij uses an explicit socket directory directly, so include the
+        // executor's Unix uid in our short fallback to preserve isolation.
+        ZELLIJ_SOCKET_DIR: getZellijSocketDir(cleanEnv.ZELLIJ_SOCKET_DIR, process.getuid?.()),
       },
     });
 
