@@ -89,6 +89,8 @@ export const sessions = pgTable(
       ],
     }).notNull(),
     agentic_tool: text('agentic_tool', {
+      // Retain the removed identifier so historical rows remain readable.
+      // Runtime creation and execution validate against AgenticToolName.
       enum: ['claude-code', 'claude-code-cli', 'codex', 'gemini', 'opencode', 'copilot', 'cursor'],
     }).notNull(),
     agentic_tool_preset_id: varchar('agentic_tool_preset_id', { length: 36 }).references(
@@ -137,9 +139,6 @@ export const sessions = pgTable(
         mcp_token?: string; // MCP authentication token for Agor self-access
         title?: string; // Session title (user-provided or auto-generated)
         description?: string; // Legacy field, may contain first prompt
-
-        // Git state
-        git_state: Session['git_state'];
 
         // Genealogy details (children array, fork/spawn points)
         genealogy: {
@@ -193,11 +192,8 @@ export const sessions = pgTable(
           };
         };
 
-        // Claude Code CLI adapter state (only set when agentic_tool === 'claude-code-cli').
-        // Persisted so the daemon can re-instantiate the JSONL watcher across
-        // daemon restarts without losing offset. See
-        // apps/agor-daemon/src/services/claude-cli-watcher.ts and
-        // docs/internal/claude-code-cli-integration-analysis-2026-05-14.md.
+        // Read-only metadata retained for historical sessions created by the
+        // removed experimental Claude CLI integration. No runtime consumes it.
         cli_state?: {
           watcher_offset?: number;
           last_event_ts?: string;
@@ -213,11 +209,7 @@ export const sessions = pgTable(
           } | null;
         };
 
-        // Billing model for this session.
-        // - 'subscription': running against the user's Claude Pro/Max
-        //   subscription's interactive limits (CLI adapter, default).
-        // - 'api-key': ANTHROPIC_API_KEY was set at spawn → per-token billing.
-        // - 'unknown': legacy rows or pre-flag detection.
+        // Read-only billing metadata retained with historical sessions.
         billing_mode?: 'subscription' | 'api-key' | 'unknown';
       }>()
       .notNull(),
@@ -316,12 +308,14 @@ export const tasks = pgTable(
       .references(() => sessions.session_id, { onDelete: 'cascade' }),
     created_at: t.timestamp('created_at').notNull(),
     started_at: t.timestamp('started_at'),
+    executor_connected_at: t.timestamp('executor_connected_at'),
     completed_at: t.timestamp('completed_at'),
     last_executor_heartbeat_at: t.timestamp('last_executor_heartbeat_at'),
     status: text('status', {
       enum: [
         'queued',
         'created',
+        'dispatching',
         'running',
         'stopping',
         'awaiting_permission',
@@ -338,9 +332,6 @@ export const tasks = pgTable(
 
     // User attribution
     created_by: varchar('created_by', { length: 36 }).notNull(),
-
-    // MD5 of SDK session file at task completion (only populated when stateless_fs_mode is enabled)
-    session_md5: text('session_md5'),
 
     data: t
       .json<unknown>('data')
@@ -376,6 +367,11 @@ export const tasks = pgTable(
 
         // Generic metadata (e.g., is_agor_callback, source, child_session_id)
         metadata?: Task['metadata'];
+        executor_mode?: Task['executor_mode'];
+        latest_executor_pulse?: Task['latest_executor_pulse'];
+        sdk_failure?: Task['sdk_failure'];
+        termination_request?: Task['termination_request'];
+        sdk_watchdog_mode?: Task['sdk_watchdog_mode'];
       }>()
       .notNull(),
   },
@@ -393,39 +389,6 @@ export const tasks = pgTable(
     queuedPositionUnique: uniqueIndex('tasks_queued_position_unique')
       .on(table.tenant_id, table.session_id, table.queue_position)
       .where(sql`${table.status} = 'queued'`),
-  })
-);
-
-/**
- * Serialized Sessions table - SDK session file snapshots for stateless_fs_mode
- */
-export const serializedSessions = pgTable(
-  'serialized_sessions',
-  {
-    tenant_id: text('tenant_id').notNull().default('default'),
-    id: varchar('id', { length: 36 }).primaryKey(),
-    session_id: varchar('session_id', { length: 36 })
-      .notNull()
-      .references(() => sessions.session_id, { onDelete: 'cascade' }),
-    branch_id: varchar('branch_id', { length: 36 })
-      .notNull()
-      .references(() => branches.branch_id, { onDelete: 'cascade' }),
-    task_id: varchar('task_id', { length: 36 }).references(() => tasks.task_id, {
-      onDelete: 'set null',
-    }),
-    turn_index: integer('turn_index').notNull().default(0),
-    created_at: t.timestamp('created_at').notNull(),
-    md5: text('md5').notNull(),
-    status: text('status').notNull(), // 'processing' | 'done' — validated at app layer
-    payload: bytea('payload'), // gzipped; NULL while status='processing'
-  },
-  (table) => ({
-    tenantIdx: index('serialized_sessions_tenant_id_idx').on(table.tenant_id),
-    sessionTurnIdx: index('serialized_sessions_session_turn_idx').on(
-      table.session_id,
-      table.turn_index
-    ),
-    branchIdx: index('serialized_sessions_branch_idx').on(table.branch_id),
   })
 );
 
@@ -989,15 +952,6 @@ export const users = pgTable(
             ANTHROPIC_AUTH_TOKEN?: string;
             ANTHROPIC_BASE_URL?: string;
           };
-          'claude-code-cli'?: {
-            // Mirrors 'claude-code' — the CLI accepts the same Anthropic env
-            // vars on the api-key path. Subscription auth reads
-            // ~/.claude/.credentials.json, not these env vars.
-            ANTHROPIC_API_KEY?: string;
-            CLAUDE_CODE_OAUTH_TOKEN?: string;
-            ANTHROPIC_AUTH_TOKEN?: string;
-            ANTHROPIC_BASE_URL?: string;
-          };
           codex?: {
             OPENAI_API_KEY?: string;
             OPENAI_BASE_URL?: string;
@@ -1033,15 +987,6 @@ export const users = pgTable(
         // Default agentic tool configuration (prepopulates session creation forms)
         default_agentic_config?: {
           'claude-code'?: {
-            modelConfig?: {
-              mode?: 'alias' | 'exact';
-              model?: string;
-              effort?: EffortLevel;
-              advisorModel?: string;
-            };
-            permissionMode?: string;
-          };
-          'claude-code-cli'?: {
             modelConfig?: {
               mode?: 'alias' | 'exact';
               model?: string;
@@ -1548,7 +1493,9 @@ export const artifactTrustGrants = pgTable(
   {
     tenant_id: text('tenant_id').notNull().default('default'),
     grant_id: varchar('grant_id', { length: 36 }).primaryKey(),
-    user_id: varchar('user_id', { length: 36 }).notNull(),
+    user_id: varchar('user_id', { length: 36 })
+      .notNull()
+      .references(() => users.user_id, { onDelete: 'cascade' }),
     scope_type: text('scope_type').notNull(),
     scope_value: text('scope_value'),
     env_vars_set: t.json<string[]>('env_vars_set').notNull(),
@@ -1778,6 +1725,39 @@ export const boardComments = pgTable(
 );
 
 /**
+ * Upload metadata control plane. Bytes live in the configured storage adapter.
+ */
+export const uploads = pgTable(
+  'uploads',
+  {
+    upload_ref: text('upload_ref').primaryKey(),
+    tenant_id: text('tenant_id').notNull().default('default'),
+    created_by: varchar('created_by', { length: 36 }).notNull(),
+    session_id: varchar('session_id', { length: 36 }).notNull(),
+    branch_id: varchar('branch_id', { length: 36 }).notNull(),
+    storage_key: text('storage_key').notNull(),
+    original_name: text('original_name').notNull(),
+    display_name: text('display_name').notNull(),
+    content_type: text('content_type').notNull(),
+    size_bytes: bigint('size_bytes', { mode: 'number' }).notNull(),
+    checksum: text('checksum'),
+    status: text('status', { enum: ['pending', 'active', 'deleting'] })
+      .notNull()
+      .default('active'),
+    provenance: text('provenance', {
+      enum: ['browser', 'gateway-slack', 'mcp-slack'],
+    }).notNull(),
+    created_at: t.timestamp('created_at').notNull(),
+    expires_at: t.timestamp('expires_at'),
+  },
+  (table) => ({
+    tenantOwnerIdx: index('uploads_tenant_owner_idx').on(table.tenant_id, table.created_by),
+    tenantSessionIdx: index('uploads_tenant_session_idx').on(table.tenant_id, table.session_id),
+    expiryIdx: index('uploads_expiry_idx').on(table.expires_at),
+  })
+);
+
+/**
  * Gateway Channels table - Registered messaging platform integrations
  *
  * Users create channels to connect messaging platforms (Slack, Discord, etc.)
@@ -1799,7 +1779,7 @@ export const gatewayChannels = pgTable(
     // Materialized for queries
     name: text('name').notNull(),
     channel_type: text('channel_type', {
-      enum: ['slack', 'discord', 'whatsapp', 'telegram', 'github', 'teams'],
+      enum: ['slack', 'discord', 'whatsapp', 'telegram', 'github', 'teams', 'shortcut'],
     }).notNull(),
     target_branch_id: varchar('target_branch_id', { length: 36 })
       .notNull()
@@ -1903,7 +1883,7 @@ export const gatewayOutboundMessages = pgTable(
       .notNull()
       .references(() => gatewayChannels.id, { onDelete: 'cascade' }),
     channel_type: text('channel_type', {
-      enum: ['slack', 'discord', 'whatsapp', 'telegram', 'github', 'teams'],
+      enum: ['slack', 'discord', 'whatsapp', 'telegram', 'github', 'teams', 'shortcut'],
     }).notNull(),
 
     platform_channel_id: text('platform_channel_id').notNull(),
@@ -2470,8 +2450,8 @@ export type ThreadSessionMapRow = typeof threadSessionMap.$inferSelect;
 export type ThreadSessionMapInsert = typeof threadSessionMap.$inferInsert;
 export type GatewayOutboundMessageRow = typeof gatewayOutboundMessages.$inferSelect;
 export type GatewayOutboundMessageInsert = typeof gatewayOutboundMessages.$inferInsert;
-export type SerializedSessionRow = typeof serializedSessions.$inferSelect;
-export type SerializedSessionInsert = typeof serializedSessions.$inferInsert;
+export type UploadRow = typeof uploads.$inferSelect;
+export type UploadInsert = typeof uploads.$inferInsert;
 export type KBNamespaceRow = typeof kbNamespaces.$inferSelect;
 export type KBNamespaceInsert = typeof kbNamespaces.$inferInsert;
 export type KBNamespaceAclRow = typeof kbNamespaceAcl.$inferSelect;

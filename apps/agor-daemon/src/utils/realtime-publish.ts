@@ -30,6 +30,19 @@ function tenantChannelName(tenantId: string): string {
  * `sessions.get`.
  */
 const SESSION_STREAM_CHANNEL_PREFIX = 'session-stream:';
+const EXECUTOR_TASK_CHANNEL_PREFIX = 'executor-task:';
+
+/**
+ * Private control-plane room for the one executor JWT scoped to a Task.
+ *
+ * Unlike normal Task events, membership is not derived from branch visibility:
+ * configureChannels joins this room only after ServiceJWTStrategy has verified
+ * an `executor-session` token whose signed `task_id` matches the room. There is
+ * no client-callable subscribe method.
+ */
+export function executorTaskChannelName(tenantId: string, taskId: string): string {
+  return `${EXECUTOR_TASK_CHANNEL_PREFIX}${tenantId}:${taskId}`;
+}
 
 export function sessionStreamChannelName(sessionId: string): string {
   return `${SESSION_STREAM_CHANNEL_PREFIX}${sessionId}`;
@@ -49,6 +62,25 @@ export function leaveAllSessionStreamChannels(app: Application, connection: unkn
       app.channel(name).leave(connection as never);
     }
   }
+}
+
+/** Drop task-control capability on logout or before replacing socket auth. */
+export function leaveAllExecutorTaskChannels(app: Application, connection: unknown): void {
+  for (const name of app.channels ?? []) {
+    if (name.startsWith(EXECUTOR_TASK_CHANNEL_PREFIX)) {
+      app.channel(name).leave(connection as never);
+    }
+  }
+}
+
+/** Join the private executor control room after the signed task claim is verified. */
+export function joinExecutorTaskChannel(
+  app: Application,
+  tenantId: string,
+  taskId: string,
+  connection: unknown
+): void {
+  app.channel(executorTaskChannelName(tenantId, taskId)).join(connection as never);
 }
 
 /**
@@ -231,6 +263,24 @@ function userFromConnection(
 function isServiceConnection(connection: unknown): boolean {
   const user = userFromConnection(connection);
   return user?._isServiceAccount === true || (user?.role as string | undefined) === 'service';
+}
+
+/** Per-connection flag: set only by the explicit `{capability:true}` announce (not by a plain subscribe), so the owner fallback skips this connection for all sessions. */
+export const SESSION_STREAMS_AWARE_FLAG = '__agorSessionStreamsAware';
+
+/** Set the aware flag. Lives beside the raw `app.channel` surface so realtime-routing mutations stay in one audited place. */
+export function markConnectionSessionStreamsAware(connection: unknown): void {
+  if (connection && typeof connection === 'object') {
+    (connection as Record<string, unknown>)[SESSION_STREAMS_AWARE_FLAG] = true;
+  }
+}
+
+function isSessionStreamsAware(connection: unknown): boolean {
+  return (
+    !!connection &&
+    typeof connection === 'object' &&
+    (connection as Record<string, unknown>)[SESSION_STREAMS_AWARE_FLAG] === true
+  );
 }
 
 function isAdminConnection(connection: unknown, allowSuperadmin: boolean): boolean {
@@ -430,9 +480,20 @@ async function resolveStreamingDelivery(
     // Best-effort owner fallback; the session room + service connections still
     // deliver even if the owner lookup fails.
   }
+  // Connections already in THIS session's room receive via the room, so the
+  // owner fallback excludes them — room-scoped, not connection-wide (an owner
+  // subscribed to A still gets fallback for other owned sessions it never joined).
+  const roomConnections = new Set<unknown>(
+    room ? (room as unknown as { connections: unknown[] }).connections : []
+  );
+  // Owner fallback: only owner connections that haven't announced awareness
+  // (aware clients get streaming via the room) and aren't in this room. Never widens.
   const ownerChannel = (): PublishChannel =>
     tenantScoped.filter(
-      (connection: unknown) => userFromConnection(connection)?.user_id === ownerId
+      (connection: unknown) =>
+        userFromConnection(connection)?.user_id === ownerId &&
+        !isSessionStreamsAware(connection) &&
+        !roomConnections.has(connection)
     );
 
   // RBAC off: no visibility model — deliver to subscribers + owner + service.
@@ -562,10 +623,17 @@ export function configureRealtimePublish(options: RealtimePublishOptions): void 
     }
 
     const authenticated = app.channel('authenticated');
+
+    // This is an executor control-plane event, not a branch-visible data
+    // broadcast. The only possible recipients are sockets placed in this room
+    // from a server-verified executor-session JWT. Do not materialize an empty
+    // room on publish: a Stop before executor connect is recovered from the
+    // durable Task state when connectExecutor/reauthentication runs.
     let tenantScoped = authenticated;
+    let tenantId: string | undefined;
     if (multiTenancy) {
       try {
-        const tenantId = resolveRealtimeTenantId(multiTenancy, context);
+        tenantId = resolveRealtimeTenantId(multiTenancy, context);
         tenantScoped = app.channel(tenantChannelName(tenantId));
       } catch (error) {
         if (error instanceof TenantResolutionError) {
@@ -578,6 +646,16 @@ export function configureRealtimePublish(options: RealtimePublishOptions): void 
         }
         throw error;
       }
+    }
+
+    if (context.path === 'tasks' && context.event === 'termination_requested') {
+      const taskId = extractTaskId(data);
+      // Production always supplies resolved multi-tenancy config. Fail closed
+      // rather than falling back to a cross-tenant task-only room if either
+      // identity is unexpectedly absent.
+      if (!tenantId || !taskId) return [];
+      const room = existingChannel(app, executorTaskChannelName(tenantId, taskId));
+      return room ? [room] : [];
     }
     const resolveDelivery = async () => {
       // Streaming events are routed to session subscribers (plus service and
@@ -635,7 +713,6 @@ export function configureRealtimePublish(options: RealtimePublishOptions): void 
     // active by the time RBAC visibility repositories run. Re-enter the scope
     // resolved for channel routing so the authorization lookup and delivery
     // decision use the same tenant as the event.
-    const tenantId = multiTenancy ? resolveRealtimeTenantId(multiTenancy, context) : undefined;
     return db && tenantId
       ? runWithTenantDatabaseScope(db, tenantId, resolveDelivery)
       : resolveDelivery();

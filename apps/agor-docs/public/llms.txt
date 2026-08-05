@@ -2,7 +2,7 @@
 
 > Agor is the command center for AI enablement — a multiplayer canvas for orchestrating AI coding agents (Claude Code, Codex, Gemini, GitHub Copilot, OpenCode, and Cursor in beta) and long-lived AI teammates. It manages branches (isolated workspaces backed by git worktrees or self-standing clones), tracks AI conversations, visualizes work on spatial boards, and enables real-time collaboration.
 
-Agor is open-source software licensed under BSL 1.1, created by Preset Inc.
+Agor is source-available software licensed under BSL 1.1. Production use is permitted by its Additional Use Grant; commercializing Agor itself as the defined Agor Offering is not. Each version later converts to Apache License 2.0 under the license terms.
 
 - Website: https://agor.live
 - GitHub: https://github.com/preset-io/agor
@@ -41,7 +41,6 @@ Agor is open-source software licensed under BSL 1.1, created by Preset Inc.
 - [API Reference](https://agor.live/api-reference): Interactive REST API documentation with Swagger UI
 - [WebSocket Events](https://agor.live/api-reference/websockets): Real-time Socket.io event reference for sessions, tasks, messages, and presence
 - [TypeScript Client](https://agor.live/guide/typescript-client): Drive Agor from TypeScript/JavaScript with @agor-live/client — REST, real-time Socket.IO, and a reactive session API
-- [API Proxies](https://agor.live/guide/api-proxies): Daemon HTTP proxy that lets Sandpack artifacts call CORS-less enterprise APIs
 - [One-Time Launch Auth](https://agor.live/guide/one-time-launch-auth): Launch-code handoff so trusted external apps can open authenticated Agor sessions
 
 ## Deployment

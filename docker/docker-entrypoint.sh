@@ -7,6 +7,27 @@ echo "🚀 Starting Agor development environment..."
 # No pnpm install needed at runtime - this is the key to fast startups!
 echo "✅ Using pre-built dependencies from Docker image"
 
+# pnpm runs a workspace-wide deps-status check (runDepsStatusCheck) before every
+# `pnpm run` / `pnpm --filter … <script>`. This image bakes in deps for only 8 of the
+# 10 workspace packages (apps/agor-docs and packages/agor-live are neither installed
+# nor shadowed by an anonymous node_modules volume), so that check always decides
+# node_modules is out of sync and kicks off a full `pnpm install`. That install then
+# wants to purge and reinstall node_modules "from scratch" and asks to confirm — a
+# prompt that hangs forever under `docker compose up` (the dev service runs with
+# tty:true, so pnpm prompts instead of erroring, and nothing ever answers it). The
+# packages we actually build and run below all have their deps baked in, so disable
+# the pre-run check entirely: the builds use what's already in the image, startup
+# stays fast, and nothing tries to reinstall.
+#
+# NB: this setting is pnpm-specific and is only read from the `pnpm_config_*` env
+# namespace — `npm_config_verify_deps_before_run` is silently ignored (verified
+# against pnpm 11.13, the version this repo pins).
+export pnpm_config_verify_deps_before_run=false
+# Belt-and-suspenders: force non-interactive mode so that if any pnpm command still
+# decides to touch node_modules, it auto-answers its modules-purge confirmation
+# instead of blocking on it (CI=true → pnpm skips the confirmation prompt).
+export CI=true
+
 # Mark /app as a safe git directory for non-branch clones (where the
 # bind-mounted source tree is owned by the host UID and trips git's
 # "dubious ownership" guard inside the container). Harmless in Agor's
@@ -123,17 +144,23 @@ done
 echo "✅ @agor/executor initial build complete (including type definitions)"
 
 # In strict/insulated Unix modes, executors are launched as non-daemon Unix
-# users. The bind-mounted /app tree can be group-private in Agor-managed
-# worktrees, so those users may not be able to read /app/packages/executor even
-# though they can read their assigned branch checkout. Build a standalone,
-# world-readable executor runtime outside /app and point the daemon at it.
+# users. Expose only the compiled runtime packages through the group-private
+# /app bind mount. Keeping the executor in place means the watch processes below
+# update exactly the files subsequent executor launches use; no second pnpm
+# installation or stale runtime copy is involved.
 if [ "${AGOR_UNIX_USER_MODE:-simple}" != "simple" ] || [ "${AGOR_USE_EXECUTOR:-false}" = "true" ]; then
-  echo "📦 Preparing shared executor runtime for Unix impersonation..."
-  rm -rf /tmp/agor-executor-runtime
-  pnpm --filter @agor/executor deploy --prod /tmp/agor-executor-runtime
-  chmod -R a+rX /tmp/agor-executor-runtime
-  export AGOR_EXECUTOR_PATH=/tmp/agor-executor-runtime/bin/agor-executor
-  echo "✅ Shared executor runtime ready: $AGOR_EXECUTOR_PATH"
+  echo "📦 Exposing compiled executor runtime for Unix impersonation..."
+  sudo chmod o+x /app /app/packages \
+    /app/packages/core /app/packages/git /app/packages/executor
+  sudo chmod a+r /app/packages/core/package.json \
+    /app/packages/git/package.json /app/packages/executor/package.json
+  sudo chmod -R a+rX /app/packages/core/dist /app/packages/git/dist \
+    /app/packages/executor/bin /app/packages/executor/dist
+  # Preserve runtime readability for files added later by the watch compilers.
+  find /app/packages/core/dist /app/packages/git/dist /app/packages/executor/dist \
+    -type d -exec sudo setfacl -m d:o::rx {} +
+  export AGOR_EXECUTOR_PATH=/app/packages/executor/bin/agor-executor
+  echo "✅ Compiled executor runtime ready: $AGOR_EXECUTOR_PATH"
 fi
 
 echo "🔨 Building @agor-live/client (initial build)..."

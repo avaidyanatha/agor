@@ -13,6 +13,7 @@
  * calls, and assert on the session payload + attach calls.
  */
 
+import { AGENTIC_TOOL_NAMES } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -188,6 +189,47 @@ describe('sessionless MCP context', () => {
   });
 });
 
+describe('agor_sessions_get_current_context', () => {
+  it('returns coherent latest-task Git boundary snapshots', async () => {
+    const app = makeFakeApp({
+      sessions: {
+        get: async () => ({
+          session_id: 'sess-current',
+          status: 'idle',
+          agentic_tool: 'codex',
+          tasks: ['task-1'],
+          genealogy: { children: [] },
+        }),
+      },
+      users: {
+        get: async () => ({ name: 'Alice', email: 'alice@example.com', role: 'member' }),
+      },
+      tasks: {
+        get: async () => ({
+          git_state: {
+            ref_at_start: 'main',
+            sha_at_start: 'start-sha',
+            ref_at_end: 'feature',
+            sha_at_end: 'end-sha',
+          },
+        }),
+      },
+    });
+    const tools = await registerAndCaptureTools(
+      { app, userId: 'user-1', sessionId: 'sess-current' },
+      ['agor_sessions_get_current_context']
+    );
+
+    const response = await tools.agor_sessions_get_current_context.cb({
+      includeSiblings: false,
+    });
+    const result = JSON.parse(response.content[0].text);
+
+    expect(result.latest_task_git_start).toEqual({ ref: 'main', sha: 'start-sha' });
+    expect(result.latest_task_git_end).toEqual({ ref: 'feature', sha: 'end-sha' });
+  });
+});
+
 describe('agor_sessions_list', () => {
   afterEach(() => {
     vi.resetModules();
@@ -333,9 +375,6 @@ describe('agor_sessions_create', () => {
   };
 
   beforeEach(() => {
-    vi.doMock('../../utils/branch-inspect.js', () => ({
-      inspectBranchViaExecutor: async () => ({ currentSha: 'sha-abc', currentRef: 'main' }),
-    }));
     vi.doMock('@agor/core/types', async () => {
       const actual = await vi.importActual<Record<string, unknown>>('@agor/core/types');
       return {
@@ -973,12 +1012,6 @@ describe('agor_sessions_create', () => {
 });
 
 describe('agor_sessions_spawn', () => {
-  beforeEach(() => {
-    vi.doMock('../../utils/branch-inspect.js', () => ({
-      inspectBranchViaExecutor: async () => ({ currentSha: 'sha-abc', currentRef: 'main' }),
-    }));
-  });
-
   afterEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
@@ -1059,12 +1092,6 @@ describe('agor_sessions_spawn', () => {
 });
 
 describe('agor_sessions_prompt (subsession mode)', () => {
-  beforeEach(() => {
-    vi.doMock('../../utils/branch-inspect.js', () => ({
-      inspectBranchViaExecutor: async () => ({ currentSha: 'sha-abc', currentRef: 'main' }),
-    }));
-  });
-
   afterEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
@@ -1297,9 +1324,7 @@ describe('agor_models_list', () => {
     const result = await agor_models_list({});
     const parsed = JSON.parse(result.content[0].text);
 
-    expect(parsed['claude-code']).toBeDefined();
-    expect(parsed.codex).toBeDefined();
-    expect(parsed.gemini).toBeDefined();
+    expect(Object.keys(parsed)).toEqual(AGENTIC_TOOL_NAMES);
 
     expect(parsed['claude-code'].default).toBe('claude-sonnet-5');
     expect(Array.isArray(parsed['claude-code'].models)).toBe(true);
@@ -1312,6 +1337,11 @@ describe('agor_models_list', () => {
     const claudeIds = parsed['claude-code'].models.map((m: { id: string }) => m.id);
     expect(claudeIds).toContain('claude-opus-4-6');
     expect(claudeIds).toContain('claude-sonnet-5');
+    expect(parsed.opencode).toMatchObject({
+      default: null,
+      models: [],
+      note: expect.stringContaining('provider-specific'),
+    });
   });
 
   it('filters to a single agenticTool when requested', async () => {
@@ -1333,15 +1363,73 @@ describe('agor_models_list', () => {
     expect(parsed.codex.note).toContain('omit modelConfig');
 
     const codexIds = parsed.codex.models.map((m: { id: string }) => m.id);
-    expect(codexIds).toEqual(['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']);
-    expect(codexIds).not.toContain('gpt-5.5');
-    expect(codexIds).not.toContain('gpt-5.4-mini');
-    expect(codexIds).not.toContain('gpt-5.4');
+    expect(codexIds.slice(0, 3)).toEqual(['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']);
+    expect(codexIds).toContain('gpt-5.5');
+    expect(codexIds).toContain('gpt-5.4-mini');
+    expect(codexIds).toContain('gpt-5.4');
     expect(codexIds).not.toContain('gpt-5-codex');
+    expect(
+      parsed.codex.models.find((model: { id: string }) => model.id === 'gpt-5.5')
+    ).toMatchObject({
+      status: 'known',
+      availability: 'provider-dependent',
+    });
   });
 });
 
 describe('inputSchema → JSON Schema conversion (MCP discovery)', () => {
+  it('accepts every active tool and rejects historical tools on session creation boundaries', async () => {
+    const tools = await registerAndCaptureTools(
+      { app: {}, userId: 'user-1', sessionId: 'sess-1' },
+      ['agor_sessions_create', 'agor_sessions_spawn', 'agor_sessions_prompt', 'agor_models_list']
+    );
+
+    for (const agenticTool of AGENTIC_TOOL_NAMES) {
+      expect(
+        tools.agor_sessions_create.cfg.inputSchema!.safeParse({
+          branchId: 'branch-1',
+          agenticTool,
+        }).success
+      ).toBe(true);
+      expect(
+        tools.agor_sessions_spawn.cfg.inputSchema!.safeParse({
+          prompt: 'delegate',
+          agenticTool,
+        }).success
+      ).toBe(true);
+      expect(
+        tools.agor_sessions_prompt.cfg.inputSchema!.safeParse({
+          sessionId: 'session-1',
+          prompt: 'delegate',
+          mode: 'subsession',
+          agenticTool,
+        }).success
+      ).toBe(true);
+      expect(
+        tools.agor_models_list.cfg.inputSchema!.safeParse({
+          agenticTool,
+        }).success
+      ).toBe(true);
+    }
+
+    for (const tool of Object.values(tools)) {
+      expect(
+        tool.cfg.inputSchema!.safeParse({
+          branchId: 'branch-1',
+          sessionId: 'session-1',
+          prompt: 'delegate',
+          mode: 'subsession',
+          agenticTool: 'claude-code-cli',
+        }).success
+      ).toBe(false);
+    }
+    expect(
+      tools.agor_models_list.cfg.inputSchema!.safeParse({
+        agenticTool: 'claude-code-cli',
+      }).success
+    ).toBe(false);
+  });
+
   // Regression: a Zod `.transform()` on `modelConfig` made `toJSONSchema` throw
   // ("Transforms cannot be represented in JSON Schema"). The catch in
   // `mcp/server.ts` then degraded the *entire* containing tool's schema to

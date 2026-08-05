@@ -23,6 +23,7 @@ import type {
   SessionRepository,
 } from '../../db/feathers-repositories.js';
 import type { PermissionService } from '../../permissions/permission-service.js';
+import { truncateContentIfNeeded } from '../../services/tool-result-truncator.js';
 import type { NormalizedSdkResponse, RawSdkResponse } from '../../types/sdk-response.js';
 // Removed import of calculateModelContextWindowUsage - inlined instead
 import type { TokenUsage } from '../../types/token-usage.js';
@@ -360,7 +361,8 @@ export class ClaudeTool implements ITool {
       taskId,
       mappedPermissionMode,
       undefined, // chunkCallback (unused)
-      abortController
+      abortController,
+      streamingCallbacks?.onPulse
     )) {
       // Detect if execution was stopped early
       if (event.type === 'stopped') {
@@ -789,12 +791,18 @@ export class ClaudeTool implements ITool {
             registerToolUses(completeEvent.toolUses);
           }
 
+          // Truncate oversized content before persisting
+          const { blocks: safeAssistantContent } = truncateContentIfNeeded(
+            completeEvent.content,
+            completeEvent.toolUses
+          );
+
           // Create assistant message with session guard (handles deleted sessions gracefully)
           const created = await withFeathersSessionGuard(sessionId, this.sessionsRepo, async () => {
             await createAssistantMessage(
               sessionId,
               assistantMessageId,
-              completeEvent.content,
+              safeAssistantContent,
               completeEvent.toolUses,
               taskId,
               nextIndex++,
@@ -802,7 +810,8 @@ export class ClaudeTool implements ITool {
               this.messagesService!,
               this.tasksService,
               completeEvent.parent_tool_use_id ?? null,
-              tokenUsage
+              tokenUsage,
+              completeEvent.isSynthesizedResult
             );
             return true;
           });
@@ -826,13 +835,19 @@ export class ClaudeTool implements ITool {
           // Best-effort: enrich Edit/Write tool results with structuredPatch diff data
           enrichToolResults(completeEvent.content);
 
+          // Truncate oversized tool results before persisting
+          const { blocks: safeUserContent } = truncateContentIfNeeded(
+            completeEvent.content,
+            undefined
+          );
+
           // Create user message with session guard (handles deleted sessions gracefully)
           await withFeathersSessionGuard(sessionId, this.sessionsRepo, async () => {
             const userMessageId = generateId() as MessageID;
             await createUserMessageFromContent(
               sessionId,
               userMessageId,
-              completeEvent.content,
+              safeUserContent,
               taskId,
               nextIndex++,
               this.messagesService!,
@@ -1164,7 +1179,8 @@ export class ClaudeTool implements ITool {
               this.messagesService!,
               this.tasksService,
               completeEvent.parent_tool_use_id ?? null,
-              tokenUsage
+              tokenUsage,
+              completeEvent.isSynthesizedResult
             );
             return true;
           } else if (completeEvent.role === MessageRole.SYSTEM) {

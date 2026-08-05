@@ -11,7 +11,11 @@ import path from 'node:path';
 import * as yaml from 'js-yaml';
 import { getDefaultAnalyticsConfig } from './analytics-defaults.js';
 import { DAEMON, MCP_TOKEN } from './constants';
-import { resolveExecutorHeartbeatConfig } from './executor-heartbeat';
+import {
+  resolveDispatchConnectTimeoutMs,
+  resolveExecutorHeartbeatConfig,
+  resolveSdkWatchdogConfig,
+} from './executor-heartbeat';
 import { assertValidMultiTenancyConfig } from './multitenancy';
 import {
   type AgorConfig,
@@ -23,8 +27,11 @@ import {
 } from './types';
 
 export const RETIRED_CONFIG_KEYS = {
+  daemon: ['allowAnonymous', 'requireAuth'],
   defaults: ['board', 'agent'],
   display: ['tableStyle', 'colorOutput', 'shortIdLength'],
+  execution: ['managed_envs_minimum_role'],
+  branches: ['others_can_default', 'others_fs_access_default'],
   onboarding: ['teammatePending', 'assistantPending', 'persistedAgentPending'],
 } as const;
 
@@ -35,8 +42,11 @@ export const RETIRED_CONFIG_PATHS = new Set<string>(
 );
 
 type LegacyConfig = AgorConfig & {
+  daemon?: AgorConfig['daemon'] & Record<string, unknown>;
   defaults?: Record<string, unknown>;
   display?: Record<string, unknown>;
+  execution?: AgorConfig['execution'] & Record<string, unknown>;
+  branches?: Record<string, unknown>;
   onboarding?: Record<string, unknown>;
 };
 
@@ -205,6 +215,17 @@ async function ensureAgorHome(): Promise<void> {
  * Validate config and throw helpful errors for deprecated/invalid settings
  */
 function validateConfig(config: AgorConfig): void {
+  const configuredAnalyticsPlugins = (config.analytics as { plugins?: unknown[] } | undefined)
+    ?.plugins;
+  const removedModulePluginIndex = configuredAnalyticsPlugins?.findIndex(
+    (plugin) =>
+      !!plugin && typeof plugin === 'object' && (plugin as { type?: unknown }).type === 'module'
+  );
+  if (removedModulePluginIndex !== undefined && removedModulePluginIndex >= 0) {
+    throw new Error(
+      `Config error: analytics.plugins[${removedModulePluginIndex}].type 'module' has been removed because loading operator-selected code in the daemon is unsafe. Use the built-in 'stdout' or 'http_batch' analytics plugin instead.`
+    );
+  }
   const removedConfig = config as AgorConfig & {
     resources?: unknown;
     services?: unknown;
@@ -223,6 +244,7 @@ function validateConfig(config: AgorConfig): void {
     credentials?: unknown;
     opencode?: unknown;
     codex?: unknown;
+    knowledge?: unknown;
     execution?: AgorConfig['execution'] & { cursor_sdk_enabled?: unknown };
   };
   if (removedProviderConfig.credentials !== undefined) {
@@ -240,6 +262,11 @@ function validateConfig(config: AgorConfig): void {
   if (removedProviderConfig.codex !== undefined) {
     throw new Error(
       "Config error: 'codex' has been removed. Codex home directories are managed per-session automatically."
+    );
+  }
+  if (removedProviderConfig.knowledge !== undefined) {
+    throw new Error(
+      "Config error: 'knowledge' has been removed. Configure semantic search in workspace Knowledge settings."
     );
   }
   if (removedProviderConfig.execution?.cursor_sdk_enabled !== undefined) {
@@ -262,10 +289,9 @@ function validateConfig(config: AgorConfig): void {
     'paths',
     'analytics',
     'telemetry',
-    'knowledge',
     'onboarding',
     'multi_tenancy',
-    'proxies',
+    'uploads',
   ]);
   const unknownTopLevelKeys = Object.keys(config).filter((key) => !knownTopLevelKeys.has(key));
   if (unknownTopLevelKeys.length > 0) {
@@ -304,10 +330,10 @@ function validateConfig(config: AgorConfig): void {
     'cors_allow_sandpack',
     'cors_origins',
     'trust_proxy_hops',
-    'allowAnonymous',
-    'requireAuth',
+    ...RETIRED_CONFIG_KEYS.daemon,
   ]);
   only(config.ui, 'ui', ['base_url', 'port', 'host']);
+  only(config.uploads, 'uploads', ['location', 'max_age_days', 'max_file_size_mb']);
   only(config.external_launch, 'external_launch', [
     'enabled',
     'exchange_url',
@@ -326,7 +352,34 @@ function validateConfig(config: AgorConfig): void {
     'allow_admin_roles',
     'trust_verified_email_for_linking',
     'login_redirect_url',
+    'forward_request_host',
+    'trusted_host_header',
+    'return_host_param',
   ]);
+  if (config.uploads !== undefined) {
+    if (
+      typeof config.uploads.location !== 'undefined' &&
+      (typeof config.uploads.location !== 'string' || config.uploads.location.trim() === '')
+    ) {
+      throw new Error("Config error: 'uploads.location' must be a non-empty path or s3:// URI");
+    }
+    if (
+      typeof config.uploads.max_age_days !== 'undefined' &&
+      (!Number.isSafeInteger(config.uploads.max_age_days) ||
+        config.uploads.max_age_days < 0 ||
+        !Number.isSafeInteger(config.uploads.max_age_days * 24 * 60 * 60 * 1000))
+    ) {
+      throw new Error("Config error: 'uploads.max_age_days' must be a non-negative integer");
+    }
+    if (
+      typeof config.uploads.max_file_size_mb !== 'undefined' &&
+      (!Number.isSafeInteger(config.uploads.max_file_size_mb) ||
+        config.uploads.max_file_size_mb <= 0 ||
+        !Number.isSafeInteger(config.uploads.max_file_size_mb * 1024 * 1024))
+    ) {
+      throw new Error("Config error: 'uploads.max_file_size_mb' must be a positive integer");
+    }
+  }
   only(config.database, 'database', ['dialect', 'sqlite', 'postgresql']);
   only(config.database?.sqlite, 'database.sqlite', ['path', 'walMode', 'busyTimeout']);
   only(config.database?.postgresql, 'database.postgresql', [
@@ -355,6 +408,8 @@ function validateConfig(config: AgorConfig): void {
   }
   only(config.execution, 'execution', [
     'executor_heartbeat',
+    'sdk_watchdog',
+    'dispatch_connect_timeout_ms',
     'executor_unix_user',
     'unix_user_mode',
     'branch_rbac',
@@ -367,10 +422,10 @@ function validateConfig(config: AgorConfig): void {
     'sync_unix_passwords',
     'daemon_writes_user_message',
     'permission_timeout_ms',
-    'stateless_fs_mode',
     'executor_command_template',
+    'executor_command_nonzero_may_have_dispatched',
     'required_user_env_vars',
-    'managed_envs_minimum_role',
+    ...RETIRED_CONFIG_KEYS.execution,
     'managed_envs_execution_mode',
     'branch_storage',
   ]);
@@ -384,6 +439,16 @@ function validateConfig(config: AgorConfig): void {
     'command_template',
     'timeout_ms',
   ]);
+  only(config.execution?.sdk_watchdog, 'execution.sdk_watchdog', [
+    'mode',
+    'first_progress_timeout_ms',
+    'abort_grace_ms',
+    'claude_idle_timeout_ms',
+  ]);
+  if (config.execution?.sdk_watchdog) {
+    resolveSdkWatchdogConfig(config.execution);
+  }
+  resolveDispatchConnectTimeoutMs(config.execution);
   only(config.execution?.branch_storage, 'execution.branch_storage', [
     'default_mode',
     'allowed_modes',
@@ -409,7 +474,7 @@ function validateConfig(config: AgorConfig): void {
     'extras',
     'override',
   ]);
-  only(config.branches, 'branches', ['others_can_default', 'others_fs_access_default']);
+  only(legacyConfig.branches, 'branches', RETIRED_CONFIG_KEYS.branches);
   only(config.teammates, 'teammates', ['framework_repo_url']);
   only(config.paths, 'paths', ['data_home']);
   only(config.analytics, 'analytics', ['enabled', 'client', 'filters', 'plugins']);
@@ -417,13 +482,26 @@ function validateConfig(config: AgorConfig): void {
   only(config.analytics?.filters, 'analytics.filters', ['exclude_events']);
   for (const [index, plugin] of (config.analytics?.plugins ?? []).entries()) {
     only(plugin, `analytics.plugins[${index}]`, ['type', 'enabled', 'options']);
-    const optionKeys =
-      plugin.type === 'stdout'
-        ? ['pretty']
-        : plugin.type === 'http_batch'
-          ? ['url', 'flush_interval_ms', 'max_batch_size', 'timeout_ms', 'headers']
-          : ['module_path', 'export_name', 'plugin_options'];
-    only(plugin.options, `analytics.plugins[${index}].options`, optionKeys);
+    switch (plugin.type) {
+      case 'stdout':
+        only(plugin.options, `analytics.plugins[${index}].options`, ['pretty']);
+        break;
+      case 'http_batch':
+        only(plugin.options, `analytics.plugins[${index}].options`, [
+          'url',
+          'flush_interval_ms',
+          'max_batch_size',
+          'timeout_ms',
+          'headers',
+        ]);
+        break;
+      default: {
+        const unsupported: never = plugin;
+        throw new Error(
+          `Config error: analytics.plugins[${index}].type '${String((unsupported as { type?: unknown }).type)}' is not supported. Use 'stdout' or 'http_batch'.`
+        );
+      }
+    }
   }
   only(config.telemetry, 'telemetry', [
     'enabled',
@@ -443,35 +521,14 @@ function validateConfig(config: AgorConfig): void {
     ...RETIRED_CONFIG_KEYS.onboarding,
     'frameworkRepoUrl',
   ]);
-  only(config.knowledge, 'knowledge', ['semantic_search']);
-  only(config.knowledge?.semantic_search, 'knowledge.semantic_search', [
-    'enabled',
-    'provider',
-    'model',
-    'dimensions',
-    'chunking',
-    'indexing',
-  ]);
-  only(config.knowledge?.semantic_search?.chunking, 'knowledge.semantic_search.chunking', [
-    'target_tokens',
-    'max_tokens',
-    'overlap_tokens',
-    'min_tokens',
-  ]);
-  only(config.knowledge?.semantic_search?.indexing, 'knowledge.semantic_search.indexing', [
-    'paused',
-    'batch_size',
-    'concurrency',
-  ]);
   only(config.multi_tenancy, 'multi_tenancy', [
+    'filesystem_isolation_enabled',
+    'tenants_base_folder',
     'mode',
     'static_tenant_id',
     'auth_claim',
     'trusted_header',
   ]);
-  for (const [name, proxy] of Object.entries(config.proxies ?? {})) {
-    only(proxy, `proxies.${name}`, ['upstream', 'description', 'docs_url', 'allowed_methods']);
-  }
   if (unknownPaths.length > 0) {
     throw new Error(
       `Config error: unrecognized ${unknownPaths.length === 1 ? 'key' : 'keys'}: ${unknownPaths.join(', ')}`
@@ -509,6 +566,42 @@ function validateConfig(config: AgorConfig): void {
     'login_redirect_url',
     'external_launch.login_redirect_url'
   );
+
+  validateExternalLaunchReturnHostParam(config);
+}
+
+/**
+ * Query-parameter name the UI reserves for the relative deep-link it forwards
+ * to the launch-init endpoint (see apps/agor-ui/src/utils/launchInitUrl.ts). The
+ * host param must never reuse this name: the UI sets `return_to` first and then
+ * the host param, so an equal name would overwrite the deep-link with the host.
+ */
+const RESERVED_RETURN_TO_PARAM = 'return_to';
+
+function validateExternalLaunchReturnHostParam(config: AgorConfig): void {
+  const raw = config.external_launch?.return_host_param;
+  if (raw === undefined) return;
+  if (typeof raw !== 'string') {
+    throw new Error('Config error: external_launch.return_host_param must be a string');
+  }
+  // An empty value intentionally falls back to the default (`return_host`) at
+  // resolve time, so it is left untouched here.
+  if (raw === '') return;
+  if (raw === RESERVED_RETURN_TO_PARAM) {
+    throw new Error(
+      `Config error: external_launch.return_host_param must not be "${RESERVED_RETURN_TO_PARAM}" — ` +
+        'that name is reserved for the relative deep-link the UI forwards to the launch-init ' +
+        'endpoint, and reusing it would overwrite the deep-link with the return host.'
+    );
+  }
+  // Conservative query-parameter-name charset: the value becomes a URL query
+  // key, so restrict it to opaque identifier characters and reject separators.
+  if (!/^[A-Za-z0-9_.-]+$/.test(raw)) {
+    throw new Error(
+      'Config error: external_launch.return_host_param may only contain letters, digits, ' +
+        'underscore, hyphen, and dot'
+    );
+  }
 }
 
 function validateOptionalHttpUrl(
@@ -663,8 +756,15 @@ export function getDefaultConfig(): AgorConfig {
     analytics: getDefaultAnalyticsConfig(),
     telemetry: {},
     multi_tenancy: {
+      filesystem_isolation_enabled: false,
+      tenants_base_folder: '~/.agor/tenants',
       mode: 'static',
       static_tenant_id: 'default',
+    },
+    uploads: {
+      location: '~/.agor',
+      max_age_days: 30,
+      max_file_size_mb: 50,
     },
   };
 }
@@ -711,24 +811,34 @@ export async function getConfigValue(key: string): Promise<string | boolean | nu
   const {
     defaults: _retiredDefaults,
     display: _retiredDisplay,
+    branches: _retiredBranches,
     onboarding: _retiredOnboarding,
     ...activeConfig
   } = config as AgorConfig & {
     defaults?: unknown;
     display?: unknown;
+    branches?: unknown;
     onboarding?: unknown;
   };
+  const {
+    allowAnonymous: _retiredAllowAnonymous,
+    requireAuth: _retiredRequireAuth,
+    ...activeDaemon
+  } = (config.daemon ?? {}) as NonNullable<AgorConfig['daemon']> & Record<string, unknown>;
+  const { managed_envs_minimum_role: _retiredManagedEnvsMinimumRole, ...activeExecution } =
+    (config.execution ?? {}) as NonNullable<AgorConfig['execution']> & Record<string, unknown>;
 
   // Merge config with defaults (deep merge for sections)
   const merged = {
     ...defaults,
     ...activeConfig,
-    daemon: { ...defaults.daemon, ...config.daemon },
+    daemon: { ...defaults.daemon, ...activeDaemon },
     ui: { ...defaults.ui, ...config.ui },
-    execution: { ...defaults.execution, ...config.execution },
+    execution: { ...defaults.execution, ...activeExecution },
     paths: { ...defaults.paths, ...config.paths },
     analytics: { ...defaults.analytics, ...config.analytics },
     telemetry: { ...defaults.telemetry, ...config.telemetry },
+    uploads: { ...defaults.uploads, ...config.uploads },
   };
 
   const parts = key.split('.');
@@ -833,16 +943,8 @@ export async function getDaemonUrl(): Promise<string> {
   }
 
   console.log('[getDaemonUrl] DAEMON_URL not in env, loading config...');
-  const config = await loadConfig();
-  const defaults = getDefaultConfig();
-
-  // 2. Build URL from config (with env var overrides for port)
-  const envPort = process.env.PORT ? Number.parseInt(process.env.PORT, 10) : undefined;
-  const port = envPort || config.daemon?.port || defaults.daemon?.port || DAEMON.DEFAULT_PORT;
-  const host = config.daemon?.host || defaults.daemon?.host || DAEMON.DEFAULT_HOST;
-
-  // 3. Construct from host:port (always localhost for internal communication)
-  return `http://${host}:${port}`;
+  // 2. Construct from host:port (always localhost for internal communication)
+  return constructDaemonLocalUrl(await loadConfig());
 }
 
 /**
@@ -856,44 +958,90 @@ function validateBaseUrl(url: string): string {
   return validateHttpUrlString(url, 'base URL', { stripTrailingSlash: true });
 }
 
+/** Construct `http://{host}:{port}` from daemon config + env overrides. */
+function constructDaemonLocalUrl(config: AgorConfig): string {
+  const defaults = getDefaultConfig();
+  const envPort = process.env.PORT ? Number.parseInt(process.env.PORT, 10) : undefined;
+  const port = envPort || config.daemon?.port || defaults.daemon?.port || DAEMON.DEFAULT_PORT;
+  const host = config.daemon?.host || defaults.daemon?.host || DAEMON.DEFAULT_HOST;
+  return `http://${host}:${port}`;
+}
+
 /**
- * Get base URL for external/user-facing links
+ * Shared base URL resolver for browser-reachable URLs.
+ *
+ * All three public resolvers ({@link getBaseUrl}, {@link getDaemonBaseUrl},
+ * {@link requirePublicBaseUrl}) differ only in which config key they prefer
+ * and whether a missing explicit URL should throw.
+ *
+ * @param prefer - `'ui'` checks `ui.base_url` first (for browser entity links),
+ *   `'daemon'` checks `daemon.base_url` first (for API endpoints / OAuth).
+ * @param requireExplicit - When true, throws instead of falling back to localhost.
+ */
+function resolveBaseUrl(
+  config: AgorConfig,
+  prefer: 'ui' | 'daemon',
+  requireExplicit?: boolean
+): string {
+  const first = prefer === 'ui' ? config.ui?.base_url : config.daemon?.base_url;
+  const second = prefer === 'ui' ? config.daemon?.base_url : config.ui?.base_url;
+
+  if (first) return validateBaseUrl(first);
+  if (second) return validateBaseUrl(second);
+
+  if (requireExplicit) {
+    throw new PublicBaseUrlNotConfiguredError(
+      'No public base URL configured. Set the AGOR_BASE_URL environment variable ' +
+        'or `daemon.base_url` (preferred) / `ui.base_url` (legacy) in ~/.agor/config.yaml ' +
+        "to the daemon's " +
+        'browser-reachable URL (e.g. https://agor.example.com). This is required ' +
+        'so OAuth providers can redirect users back to a URL their browser can reach — ' +
+        'the localhost fallback only works for browsers on the daemon machine.'
+    );
+  }
+
+  return constructDaemonLocalUrl(config);
+}
+
+/**
+ * Get the daemon base URL for browser-reachable API endpoints
+ * (e.g. artifact `AGOR_API_URL` grants).
+ *
+ * Distinct from {@link getDaemonUrl}, which uses `DAEMON_URL` for internal
+ * backend-to-backend communication.
+ *
+ * Resolution order:
+ * 1. AGOR_BASE_URL environment variable (highest priority)
+ * 2. daemon.base_url from config.yaml
+ * 3. ui.base_url from legacy one-origin configs
+ * 4. Default daemon host and port
+ */
+export async function getDaemonBaseUrl(): Promise<string> {
+  if (process.env.AGOR_BASE_URL) {
+    return validateBaseUrl(process.env.AGOR_BASE_URL);
+  }
+  return resolveBaseUrl(await loadConfig(), 'daemon');
+}
+
+/**
+ * Get base URL for external/user-facing UI links.
  *
  * Used to generate clickable URLs to sessions, boards, and other resources
  * that are sent to external platforms like Slack, email, etc.
  *
  * Resolution order:
  * 1. AGOR_BASE_URL environment variable (highest priority)
- * 2. daemon.base_url from config.yaml
- * 3. Default: http://localhost:{port} (constructed from daemon port)
+ * 2. ui.base_url from config.yaml
+ * 3. daemon.base_url from config.yaml
+ * 4. Default: http://localhost:{port} (constructed from daemon port)
  *
  * @returns Base URL without trailing slash (e.g., "https://agor.sandbox.preset.zone")
  */
 export async function getBaseUrl(): Promise<string> {
-  // 1. Check for explicit AGOR_BASE_URL env var (highest priority)
   if (process.env.AGOR_BASE_URL) {
     return validateBaseUrl(process.env.AGOR_BASE_URL);
   }
-
-  const config = await loadConfig();
-
-  // 2. Check config.yaml
-  if (config.daemon?.base_url) {
-    return validateBaseUrl(config.daemon.base_url);
-  }
-
-  // 3. Backward-compatible UI public URL used by older configs.
-  if (config.ui?.base_url) {
-    return validateBaseUrl(config.ui.base_url);
-  }
-
-  // 4. Default: construct from daemon port (no validation needed for default)
-  const defaults = getDefaultConfig();
-  const envPort = process.env.PORT ? Number.parseInt(process.env.PORT, 10) : undefined;
-  const port = envPort || config.daemon?.port || defaults.daemon?.port || DAEMON.DEFAULT_PORT;
-  const host = config.daemon?.host || defaults.daemon?.host || DAEMON.DEFAULT_HOST;
-
-  return `http://${host}:${port}`;
+  return resolveBaseUrl(await loadConfig(), 'ui');
 }
 
 /**
@@ -915,14 +1063,15 @@ export class PublicBaseUrlNotConfiguredError extends Error {
 /**
  * Get the daemon's public, browser-reachable base URL.
  *
- * Strict variant of {@link getBaseUrl} — required for any URL that will be handed
+ * Strict variant of {@link getDaemonBaseUrl} — required for any URL that will be handed
  * to a remote system (e.g. an OAuth `redirect_uri` registered with an upstream
  * provider) and then loaded by an end-user's browser.
  *
  * Resolution:
  * 1. `AGOR_BASE_URL` environment variable
  * 2. `daemon.base_url` from `~/.agor/config.yaml`
- * 3. **Throws** {@link PublicBaseUrlNotConfiguredError}
+ * 3. Legacy `ui.base_url` fallback
+ * 4. **Throws** {@link PublicBaseUrlNotConfiguredError}
  *
  * Unlike {@link getBaseUrl}, this never silently falls back to
  * `http://localhost:{port}` — that fallback is broken for any browser not on
@@ -936,24 +1085,7 @@ export async function requirePublicBaseUrl(): Promise<string> {
   if (process.env.AGOR_BASE_URL) {
     return validateBaseUrl(process.env.AGOR_BASE_URL);
   }
-
-  const config = await loadConfig();
-  if (config.daemon?.base_url) {
-    return validateBaseUrl(config.daemon.base_url);
-  }
-
-  if (config.ui?.base_url) {
-    return validateBaseUrl(config.ui.base_url);
-  }
-
-  throw new PublicBaseUrlNotConfiguredError(
-    'No public base URL configured. Set the AGOR_BASE_URL environment variable ' +
-      'or `daemon.base_url` (preferred) / `ui.base_url` (legacy) in ~/.agor/config.yaml ' +
-      "to the daemon's " +
-      'browser-reachable URL (e.g. https://agor.example.com). This is required ' +
-      'so OAuth providers can redirect users back to a URL their browser can reach — ' +
-      'the localhost fallback only works for browsers on the daemon machine.'
-  );
+  return resolveBaseUrl(await loadConfig(), 'daemon', true);
 }
 
 /**
@@ -1104,6 +1236,11 @@ export interface ResolvedExecutionSecurityMode {
   requiresDaemonUnixUser: boolean;
   /** Whether new repos/branches should initialize Unix groups. */
   shouldInitUnixGroups: boolean;
+  /**
+   * Whether every user must have a `unix_username` (strict and delegated).
+   * Session creation and executor/terminal launches fail loudly without one.
+   */
+  requiresUserUnixUsername: boolean;
 }
 
 /**
@@ -1112,13 +1249,16 @@ export interface ResolvedExecutionSecurityMode {
  * Keep this as the single semantic boundary between app-layer RBAC and
  * OS/filesystem isolation:
  * - `branch_rbac` controls Agor app permissions only.
- * - non-`simple` `unix_user_mode` controls Unix impersonation/groups/FS ACLs.
+ * - `insulated`/`strict` `unix_user_mode` controls Unix impersonation/groups/FS ACLs.
+ * - `delegated` requires per-user `unix_username` but performs no OS-level
+ *   work on the daemon host (no sudo, no groups, no sudoers) — identity
+ *   enforcement is delegated to the execution substrate.
  */
 export function resolveExecutionSecurityMode(
   config: AgorConfig = loadConfigSync()
 ): ResolvedExecutionSecurityMode {
   const unixUserMode = config.execution?.unix_user_mode ?? 'simple';
-  const unixIsolationEnabled = unixUserMode !== 'simple';
+  const unixIsolationEnabled = unixUserMode === 'insulated' || unixUserMode === 'strict';
 
   return {
     appRbacEnabled: config.execution?.branch_rbac === true,
@@ -1128,7 +1268,18 @@ export function resolveExecutionSecurityMode(
     unixGroupRefreshNeeded: unixIsolationEnabled,
     requiresDaemonUnixUser: unixIsolationEnabled,
     shouldInitUnixGroups: unixIsolationEnabled,
+    requiresUserUnixUsername: unixUserModeRequiresUsername(unixUserMode),
   };
+}
+
+/**
+ * Whether a Unix user mode treats per-user `unix_username` as load-bearing
+ * identity. Single predicate shared by `resolveExecutionSecurityMode()` and
+ * call sites that only have the raw mode, so the strict/delegated pairing
+ * cannot drift.
+ */
+export function unixUserModeRequiresUsername(mode: import('./types').UnixUserMode): boolean {
+  return mode === 'strict' || mode === 'delegated';
 }
 
 /**
@@ -1151,8 +1302,8 @@ export function isBranchRbacEnabled(): boolean {
 /**
  * Check if Unix user impersonation is enabled
  *
- * Returns true when unix_user_mode is set to anything other than 'simple'
- * (i.e., 'insulated' or 'strict')
+ * Returns true when unix_user_mode is 'insulated' or 'strict'. 'delegated'
+ * does not impersonate — identity enforcement lives in the execution substrate.
  */
 export function isUnixImpersonationEnabled(): boolean {
   try {
@@ -1292,14 +1443,59 @@ export function getDataHome(): string {
 }
 
 /**
+ * Pure tenant-data-root policy shared by sync and async config loaders.
+ */
+function resolveTenantDataRoot(
+  config: AgorConfig,
+  dataHome: string,
+  agorHome: string,
+  tenantId?: string
+): string {
+  if (config.multi_tenancy?.filesystem_isolation_enabled !== true) {
+    return dataHome;
+  }
+
+  const normalizedTenantId = tenantId?.trim();
+  if (
+    !normalizedTenantId ||
+    normalizedTenantId === '.' ||
+    normalizedTenantId === '..' ||
+    normalizedTenantId.includes('/') ||
+    normalizedTenantId.includes('\\')
+  ) {
+    throw new Error(
+      'A valid tenant id is required when multi_tenancy.filesystem_isolation_enabled is true'
+    );
+  }
+
+  const configuredBase = config.multi_tenancy.tenants_base_folder || '~/.agor/tenants';
+  const expandedBase = expandHomePath(configuredBase);
+  const tenantsBase = path.isAbsolute(expandedBase)
+    ? expandedBase
+    : path.resolve(agorHome, expandedBase);
+  return path.join(tenantsBase, normalizedTenantId);
+}
+
+/**
+ * Resolve the root containing tenant-owned filesystem data.
+ *
+ * Single-tenant installs retain the historical data home. When filesystem
+ * multi-tenancy is enabled, a tenant id is required and the result is
+ * `<tenants_base_folder>/<tenantId>`.
+ */
+export function getTenantDataRoot(tenantId?: string): string {
+  return resolveTenantDataRoot(loadConfigSync(), getDataHome(), getAgorHome(), tenantId);
+}
+
+/**
  * Get repos directory path
  *
  * Returns: $AGOR_DATA_HOME/repos
  *
  * @returns Absolute path to repos directory
  */
-export function getReposDir(): string {
-  return path.join(getDataHome(), 'repos');
+export function getReposDir(tenantId?: string): string {
+  return path.join(getTenantDataRoot(tenantId), 'repos');
 }
 
 /**
@@ -1315,8 +1511,8 @@ export function getReposDir(): string {
  *
  * @returns Absolute path to the branches directory
  */
-export function getBranchesDir(): string {
-  return path.join(getDataHome(), 'worktrees');
+export function getBranchesDir(tenantId?: string): string {
+  return path.join(getTenantDataRoot(tenantId), 'worktrees');
 }
 
 /**
@@ -1330,8 +1526,8 @@ export function getBranchesDir(): string {
  * @param branchName - Branch name (e.g., "feature-x")
  * @returns Absolute path to the branch
  */
-export function getBranchPath(repoSlug: string, branchName: string): string {
-  return path.join(getBranchesDir(), repoSlug, branchName);
+export function getBranchPath(repoSlug: string, branchName: string, tenantId?: string): string {
+  return path.join(getBranchesDir(tenantId), repoSlug, branchName);
 }
 
 /**
@@ -1362,13 +1558,19 @@ export async function getDataHomeAsync(): Promise<string> {
   return getAgorHome();
 }
 
+/** Async counterpart to {@link getTenantDataRoot}. */
+export async function getTenantDataRootAsync(tenantId?: string): Promise<string> {
+  const [config, dataHome] = await Promise.all([loadConfig(), getDataHomeAsync()]);
+  return resolveTenantDataRoot(config, dataHome, getAgorHome(), tenantId);
+}
+
 /**
  * Get repos directory path (async version)
  *
  * @returns Absolute path to repos directory
  */
-export async function getReposDirAsync(): Promise<string> {
-  return path.join(await getDataHomeAsync(), 'repos');
+export async function getReposDirAsync(tenantId?: string): Promise<string> {
+  return path.join(await getTenantDataRootAsync(tenantId), 'repos');
 }
 
 /**
@@ -1379,6 +1581,6 @@ export async function getReposDirAsync(): Promise<string> {
  *
  * @returns Absolute path to branches directory
  */
-export async function getBranchesDirAsync(): Promise<string> {
-  return path.join(await getDataHomeAsync(), 'worktrees');
+export async function getBranchesDirAsync(tenantId?: string): Promise<string> {
+  return path.join(await getTenantDataRootAsync(tenantId), 'worktrees');
 }

@@ -4,7 +4,7 @@
  * Type-safe CRUD operations for sessions with short ID support.
  */
 
-import type { BranchID, Session, SessionID, UUID } from '@agor/core/types';
+import type { BranchID, Session, SessionID, SessionUpdate, UUID } from '@agor/core/types';
 import { SessionStatus } from '@agor/core/types';
 import { and, desc, eq, inArray, like, or, sql } from 'drizzle-orm';
 import { getBaseUrl } from '../../config/config-manager';
@@ -12,6 +12,7 @@ import { generateId, shortId } from '../../lib/ids';
 import { getSessionUrl } from '../../utils/url';
 import type { Database } from '../client';
 import { deleteFrom, insert, lockRowForUpdate, select, txAsDb, update } from '../database-wrapper';
+import { sanitizeDbError } from '../sanitize-error';
 import {
   branches,
   branchOwners,
@@ -56,7 +57,7 @@ export type SessionArchiveStateUpdate = {
  * Do not add title/description/model/permission fields here — those are
  * user-visible session metadata changes and should continue to affect recency.
  */
-function isSessionTimestampNeutralPatch(updates: Partial<Session>): boolean {
+function isSessionTimestampNeutralPatch(updates: SessionUpdate): boolean {
   const keys = Object.keys(updates);
   return keys.length === 1 && keys[0] === 'ready_for_prompt' && updates.ready_for_prompt === false;
 }
@@ -78,6 +79,11 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
    */
   private rowToSession(row: SessionRow, branchBoardId?: UUID | null, baseUrl?: string): Session {
     const genealogyData = row.data.genealogy || { children: [] };
+    // Older rows may still contain the former session-level git_state JSON.
+    // Task snapshots are authoritative; do not expose the legacy projection.
+    const { git_state: _legacyGitState, ...sessionData } = row.data as typeof row.data & {
+      git_state?: unknown;
+    };
     const sessionId = row.session_id as SessionID;
     const boardId = branchBoardId ?? null;
 
@@ -102,7 +108,7 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         branch_id: row.branch_id as UUID,
         branch_board_id: boardId,
         url,
-        ...row.data,
+        ...sessionData,
         tasks: row.data.tasks.map((id) => id as UUID),
         genealogy: {
           parent_session_id: row.parent_session_id as UUID | undefined,
@@ -163,15 +169,10 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
       archived_reason: session.archived_reason ?? null,
       data: {
         agentic_tool_version: session.agentic_tool_version,
-        sdk_session_id: session.sdk_session_id, // Preserve SDK session ID for conversation continuity
+        ...(session.sdk_session_id !== undefined ? { sdk_session_id: session.sdk_session_id } : {}),
         mcp_token: session.mcp_token, // MCP authentication token for Agor self-access
         title: session.title,
         description: session.description,
-        git_state: session.git_state ?? {
-          ref: 'main',
-          base_sha: '',
-          current_sha: '',
-        },
         genealogy: session.genealogy ?? {
           children: [],
         },
@@ -185,12 +186,10 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         current_context_usage: session.current_context_usage,
         context_window_limit: session.context_window_limit,
         last_context_update_at: session.last_context_update_at,
-        // Claude Code CLI adapter state. Hard-coded in this insert
-        // builder so updates to `cli_state` actually persist — without
-        // this entry deepMerge in update() would put the field on the
-        // in-memory object but sessionToInsert would drop it on save.
+        // Preserve read-only metadata on historical rows. No runtime consumes
+        // these fields, but omitting them here would silently erase history
+        // during unrelated session patches.
         cli_state: session.cli_state,
-        // Billing model snapshot (subscription / api-key / unknown).
         billing_mode: session.billing_mode,
       },
     };
@@ -713,7 +712,7 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
    */
   async update(
     id: string,
-    updates: Partial<Session>,
+    updates: SessionUpdate,
     options: { replaceAgenticConfig?: boolean } = {}
   ): Promise<Session> {
     try {
@@ -753,7 +752,13 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         // IMPORTANT: Receiver-side merge for nested objects (permission_config, model_config, etc.)
         // This prevents partial updates from losing existing nested fields.
         // Strategy: Objects = deep merge, Arrays = replace, Primitives = replace
-        const merged = deepMerge(current, updates);
+        const { sdk_session_id: sdkSessionIdUpdate, ...genericUpdates } = updates;
+        const merged = deepMerge(current, genericUpdates);
+        if (sdkSessionIdUpdate === null) {
+          delete merged.sdk_session_id;
+        } else if (sdkSessionIdUpdate !== undefined) {
+          merged.sdk_session_id = sdkSessionIdUpdate;
+        }
         if (options.replaceAgenticConfig) {
           if (Object.hasOwn(updates, 'model_config')) {
             merged.model_config = updates.model_config;
@@ -941,7 +946,7 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         throw new EntityNotFoundError('Session', id);
       }
     } catch (error) {
-      console.error(`❌ [SessionRepo] Failed to delete session ${id}:`, error);
+      console.error(`❌ [SessionRepo] Failed to delete session ${id}:`, sanitizeDbError(error));
       if (error instanceof EntityNotFoundError) throw error;
       throw new RepositoryError(
         `Failed to delete session: ${error instanceof Error ? error.message : String(error)}`,

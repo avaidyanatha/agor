@@ -4,7 +4,6 @@ import { fileURLToPath } from 'node:url';
 import { blogPosts } from '../lib/blogPosts';
 import {
   DEFAULT_SOCIAL_IMAGE,
-  FAVICON_PATH,
   type FrontMatterLike,
   getSocialImage,
   isAbsoluteUrl,
@@ -66,6 +65,9 @@ function assertBlogPostsMatchPages(pages: PageMetadata[], errors: string[]): voi
     blogPages.map((page) => path.basename(page.filePath, path.extname(page.filePath)))
   );
   const listedSlugs = new Set(blogPosts.map((post) => post.slug));
+  const pagesBySlug = new Map(
+    blogPages.map((page) => [path.basename(page.filePath, path.extname(page.filePath)), page])
+  );
 
   for (const slug of pageSlugs) {
     if (!listedSlugs.has(slug)) {
@@ -76,6 +78,15 @@ function assertBlogPostsMatchPages(pages: PageMetadata[], errors: string[]): voi
   for (const post of blogPosts) {
     if (!pageSlugs.has(post.slug)) {
       errors.push(`lib/blogPosts.ts: entry has no matching content/blog/${post.slug}.mdx`);
+      continue;
+    }
+
+    const frontMatter = pagesBySlug.get(post.slug)?.frontMatter;
+    if (frontMatter?.author !== post.author) {
+      errors.push(`content/blog/${post.slug}.mdx: author does not match lib/blogPosts.ts`);
+    }
+    if (String(frontMatter?.date) !== post.date) {
+      errors.push(`content/blog/${post.slug}.mdx: date does not match lib/blogPosts.ts`);
     }
   }
 
@@ -116,7 +127,6 @@ const pages: PageMetadata[] = walk(pagesDir)
 const errors: string[] = [];
 
 assertLocalPublicImageExists(DEFAULT_SOCIAL_IMAGE, 'default social image', errors);
-assertLocalPublicImageExists(FAVICON_PATH, 'favicon (siteMetadata.FAVICON_PATH)', errors);
 assertLocalPublicImageExists(LOGO_PATH, 'logo (siteMetadata.LOGO_PATH)', errors);
 assertBlogPostsMatchPages(pages, errors);
 

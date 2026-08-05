@@ -9,7 +9,8 @@ encodes whether the prompt ran or got queued.**
 
 - `task.status === 'queued'` → session was busy; the task is waiting and will
   drain automatically when the session goes idle.
-- `task.status === 'running'` → ran immediately.
+- `task.status === 'dispatching'` → daemon persisted launch intent and is starting an executor.
+- `task.status === 'running'` → the executor connected and claimed the task.
 - `task.queue_position` → ordering within the session's queue (lowest drains
   first), populated only while QUEUED.
 
@@ -22,12 +23,13 @@ There is no separate "queued vs ran" envelope. The route does not take a
    `TaskRepository.createPending({ status })`. CREATED if the session is idle
    with no queue, QUEUED otherwise. Sentinel values (`message_range.start_index = -1`,
    `git_state.sha_at_start = ''`) are stamped here and stay until the
-   QUEUED → RUNNING transition.
+   QUEUED → DISPATCHING/RUNNING launch transition.
 2. **Drain** — when a session reaches a terminal task state, the queue
    processor picks the lowest `queue_position` and hands it to
-   `spawnTaskExecutor`, which is the *sole* place that pins
-   `message_range`/`git_state`, writes the initial user-message row, and
-   spawns the executor.
+   `spawnTaskExecutor`, which is the _sole_ place that pins
+   `message_range`/`git_state`, writes the initial user-message row, persists
+   DISPATCHING, and spawns the executor. After authentication, the executor
+   atomically claims DISPATCHING → RUNNING.
 3. **Race safety** — `createPending` wraps the `max(queue_position) + 1`
    read-then-insert in a transaction so concurrent writers can't collide on
    identical positions.
@@ -48,3 +50,6 @@ Tasks are the natural queueable unit: each prompt is exactly one task, the task
 already carries the prompt + metadata + lifecycle, and the executor only needs
 to know "give me the next task to run." Migration to task-level queueing
 landed in `never-lose-prompt` (sqlite/0040, postgres/0030).
+
+For the post-launch lifecycle, executor heartbeat, SDK pulse/watchdog, and
+termination ownership, see [task-runtime-state.md](task-runtime-state.md).

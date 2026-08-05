@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { SessionsServiceImpl } from '../declarations.js';
+
 import { markStoppedSessionPromptableNoDrain, stopSessionPreserveQueue } from './session-stop.js';
 
 describe('markStoppedSessionPromptableNoDrain', () => {
@@ -43,6 +44,38 @@ describe('markStoppedSessionPromptableNoDrain', () => {
 });
 
 describe('stopSessionPreserveQueue', () => {
+  it('rejects process control for a historical removed-runtime session', async () => {
+    const task = {
+      task_id: 'task-cli',
+      session_id: 'session-cli',
+      status: 'running',
+      created_at: '2026-01-01T00:00:00.000Z',
+    };
+    const session = {
+      session_id: task.session_id,
+      agentic_tool: 'claude-code-cli',
+      status: 'running',
+      ready_for_prompt: false,
+      tasks: [task.task_id],
+    };
+    const requestTermination = vi.fn();
+    await expect(
+      stopSessionPreserveQueue(
+        {
+          app: {
+            service: () => ({ find: vi.fn().mockResolvedValue({ data: [task] }) }),
+          } as never,
+          taskRepo: { findQueued: vi.fn().mockResolvedValue([]) } as never,
+          sessionsService: { get: vi.fn().mockResolvedValue(session), patch: vi.fn() } as never,
+          requestTermination: requestTermination as never,
+        } as never,
+        session.session_id as never
+      )
+    ).rejects.toThrow('removed experimental Claude Code CLI integration');
+
+    expect(requestTermination).not.toHaveBeenCalled();
+  });
+
   it('stops only the active task and preserves queued tasks for the caller to drain after the lock', async () => {
     const sessionId = 'session-1';
     const runningTask = {
@@ -62,14 +95,12 @@ describe('stopSessionPreserveQueue', () => {
     const sessionsService = {
       get: vi.fn(async () => ({
         session_id: sessionId,
+        agentic_tool: 'claude-code',
         status: 'running',
         ready_for_prompt: false,
         tasks: [runningTask.task_id],
       })),
       patch: vi.fn(async (_id, data) => data),
-    };
-    const tasksService = {
-      patch: vi.fn(async (id, data) => ({ task_id: id, ...data })),
     };
     const taskRepo = {
       findQueued: vi.fn(async () => [queuedTask]),
@@ -84,7 +115,7 @@ describe('stopSessionPreserveQueue', () => {
         throw new Error(`unexpected service ${name}`);
       },
     };
-    const killExecutorProcess = vi.fn(() => true);
+    const requestTermination = vi.fn(async () => ({ status: 'terminal', task: runningTask }));
     const params = { provider: 'rest' };
 
     const result = await stopSessionPreserveQueue(
@@ -92,8 +123,7 @@ describe('stopSessionPreserveQueue', () => {
         app: app as never,
         taskRepo: taskRepo as never,
         sessionsService: sessionsService as never,
-        tasksService: tasksService as never,
-        killExecutorProcess,
+        requestTermination: requestTermination as never,
       },
       sessionId as never,
       params,
@@ -106,20 +136,8 @@ describe('stopSessionPreserveQueue', () => {
       stoppedTaskId: runningTask.task_id,
       queuedTasksPreserved: 1,
     });
-    expect(killExecutorProcess).toHaveBeenCalledWith(sessionId);
-    expect(tasksService.patch).toHaveBeenCalledTimes(1);
-    expect(tasksService.patch).toHaveBeenCalledWith(
-      runningTask.task_id,
-      expect.objectContaining({ status: 'stopped' }),
-      expect.objectContaining({
-        suppressTerminalQueueProcessing: true,
-        suppressCompletionCallbacks: true,
-      })
-    );
-    expect(sessionsService.patch).toHaveBeenCalledWith(
-      sessionId,
-      { status: 'idle', ready_for_prompt: true },
-      expect.objectContaining({ provider: 'rest', suppressTerminalQueueProcessing: true })
+    expect(requestTermination).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: runningTask.task_id, cause: 'user_stop' })
     );
   });
 
@@ -135,14 +153,12 @@ describe('stopSessionPreserveQueue', () => {
     const sessionsService = {
       get: vi.fn(async () => ({
         session_id: sessionId,
+        agentic_tool: 'claude-code',
         status: 'awaiting_input',
         ready_for_prompt: false,
         tasks: [awaitingInputTask.task_id],
       })),
       patch: vi.fn(async (_id, data) => data),
-    };
-    const tasksService = {
-      patch: vi.fn(async (id, data) => ({ task_id: id, ...data })),
     };
     const taskRepo = {
       findQueued: vi.fn(async () => []),
@@ -157,15 +173,17 @@ describe('stopSessionPreserveQueue', () => {
         throw new Error(`unexpected service ${name}`);
       },
     };
-    const killExecutorProcess = vi.fn(() => true);
+    const requestTermination = vi.fn(async () => ({
+      status: 'terminal',
+      task: awaitingInputTask,
+    }));
 
     const result = await stopSessionPreserveQueue(
       {
         app: app as never,
         taskRepo: taskRepo as never,
         sessionsService: sessionsService as never,
-        tasksService: tasksService as never,
-        killExecutorProcess,
+        requestTermination: requestTermination as never,
       },
       sessionId as never,
       {},
@@ -178,11 +196,8 @@ describe('stopSessionPreserveQueue', () => {
       stoppedTaskId: awaitingInputTask.task_id,
       queuedTasksPreserved: 0,
     });
-    expect(killExecutorProcess).toHaveBeenCalledWith(sessionId);
-    expect(tasksService.patch).toHaveBeenCalledWith(
-      awaitingInputTask.task_id,
-      expect.objectContaining({ status: 'stopped' }),
-      expect.objectContaining({ suppressCompletionCallbacks: true })
+    expect(requestTermination).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: awaitingInputTask.task_id, cause: 'user_stop' })
     );
   });
 
@@ -198,6 +213,7 @@ describe('stopSessionPreserveQueue', () => {
     const sessionsService = {
       get: vi.fn(async () => ({
         session_id: sessionId,
+        agentic_tool: 'claude-code',
         status: 'running',
         ready_for_prompt: false,
         tasks: [runningTask.task_id],
@@ -205,9 +221,6 @@ describe('stopSessionPreserveQueue', () => {
       patch: vi.fn(async () => {
         throw new Error('patch denied');
       }),
-    };
-    const tasksService = {
-      patch: vi.fn(async (id, data) => ({ task_id: id, ...data })),
     };
     const taskRepo = {
       findQueued: vi.fn(async () => []),
@@ -223,24 +236,20 @@ describe('stopSessionPreserveQueue', () => {
       },
     };
 
+    const requestTermination = vi.fn(async () => {
+      throw new Error('containment failed');
+    });
     await expect(
       stopSessionPreserveQueue(
         {
           app: app as never,
           taskRepo: taskRepo as never,
           sessionsService: sessionsService as never,
-          tasksService: tasksService as never,
-          killExecutorProcess: vi.fn(() => true),
+          requestTermination: requestTermination as never,
         },
         sessionId as never,
         { provider: 'rest' }
       )
-    ).rejects.toThrow('patch denied');
-
-    expect(tasksService.patch).toHaveBeenCalledWith(
-      runningTask.task_id,
-      expect.objectContaining({ status: 'stopped' }),
-      expect.objectContaining({ suppressTerminalQueueProcessing: true })
-    );
+    ).rejects.toThrow('containment failed');
   });
 });

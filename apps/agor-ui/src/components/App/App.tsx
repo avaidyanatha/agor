@@ -1,4 +1,5 @@
 import type {
+  AgenticToolName,
   AgorClient,
   Artifact,
   Board,
@@ -8,7 +9,8 @@ import type {
   CreateMCPServerInput,
   CreateRepoRequest,
   CreateUserInput,
-  GatewayChannel,
+  GatewayChannelCreateData,
+  GatewayChannelPatchData,
   PermissionMode,
   Repo,
   Session,
@@ -62,9 +64,13 @@ import {
 import type { AgenticToolOption } from '../../types';
 import { initializeAudioOnInteraction } from '../../utils/audio';
 import { useThemedMessage } from '../../utils/message';
+import { resolveQuickStartMcpServerIds } from '../../utils/resolveQuickStartMcpServerIds';
 import { hasExplicitEntityRouteTarget } from '../../utils/routeTargets';
 import { startTeammateBootstrapSession } from '../../utils/startTeammateBootstrapSession';
-import { buildTeammateBootstrapPrompt } from '../../utils/teammateBootstrapPrompt';
+import {
+  buildTeammateBootstrapPrompt,
+  buildTeammateOnboardingSessionTitle,
+} from '../../utils/teammateBootstrapPrompt';
 import { createTeammateBranch } from '../../utils/teammateCreation';
 import { AppHeader } from '../AppHeader';
 import type { BoardTeammatePanelTab } from '../BoardTeammatePanel';
@@ -81,6 +87,7 @@ import { NewSessionButton } from '../NewSessionButton';
 import { type NewSessionConfig, NewSessionModal } from '../NewSessionModal';
 import { SessionCanvas, type SessionCanvasRef } from '../SessionCanvas';
 import { SessionPanel } from '../SessionPanel';
+import { PendingToolChoicePanel } from '../SessionPanel/PendingToolChoicePanel';
 import { SessionSettingsModal } from '../SessionSettingsModal';
 import { SettingsModal, UserSettingsModal } from '../SettingsModal';
 import { TerminalModal, WEB_TERMINAL_MIN_ROLE } from '../TerminalModal';
@@ -216,8 +223,8 @@ export interface AppProps {
   onDeleteUser?: (userId: string) => void;
   onCreateMCPServer?: (data: CreateMCPServerInput) => void;
   onDeleteMCPServer?: (mcpServerId: string) => void;
-  onCreateGatewayChannel?: (data: Partial<GatewayChannel>) => void;
-  onUpdateGatewayChannel?: (channelId: string, updates: Partial<GatewayChannel>) => void;
+  onCreateGatewayChannel?: (data: GatewayChannelCreateData) => void;
+  onUpdateGatewayChannel?: (channelId: string, updates: GatewayChannelPatchData) => void;
   onDeleteGatewayChannel?: (channelId: string) => void;
   onUpdateArtifact?: (artifactId: string, updates: Partial<Artifact>) => void;
   onDeleteArtifact?: (artifactId: string) => void;
@@ -237,6 +244,7 @@ export interface AppProps {
   /** Whether the web terminal is enabled on this instance (execution.allow_web_terminal) */
   webTerminalEnabled?: boolean;
   branchStorageConfig?: BranchStorageConfig;
+  uploadPolicy?: import('@agor/core/types').UploadIngressPolicy;
 }
 
 // Stable empty-array sentinel: keeps prop refs equal across renders for the
@@ -346,6 +354,7 @@ export const App: React.FC<AppProps> = ({
   instanceDescription,
   webTerminalEnabled = false,
   branchStorageConfig,
+  uploadPolicy,
 }) => {
   // The always-mounted shell holds NO whole-map subscriptions. Everything it
   // needs is either a narrow per-id / derived-scalar selector below (which
@@ -353,7 +362,7 @@ export const App: React.FC<AppProps> = ({
   // `agorStore.getState()` read inside a handler, or pushed down into the
   // component that actually consumes the map (SettingsModal, UrlStateBridge).
   const { token } = theme.useToken();
-  const { showWarning } = useThemedMessage();
+  const { showWarning, showError } = useThemedMessage();
   const location = useLocation();
   const routeParams = useParams<{
     sessionShortId?: string;
@@ -365,6 +374,11 @@ export const App: React.FC<AppProps> = ({
   const [pendingHomeNavigation, setPendingHomeNavigation] = useState(false);
   const sessionCanvasRef = useRef<SessionCanvasRef>(null);
   const [newSessionBranchId, setNewSessionBranchId] = useState<string | null>(null);
+  // Set instead of creating a session immediately when quick-start can't
+  // resolve a tool (no preference, no prior session for this user). Opens
+  // the drawer straight away in a "pick a tool" empty state rather than the
+  // old blocking modal — see `chooseAgenticTool` / `handleQuickStartSession`.
+  const [pendingToolChoiceBranchId, setPendingToolChoiceBranchId] = useState<string | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [createDialogDefaultTab, setCreateDialogDefaultTab] = useState<
     'branch' | 'teammate' | 'board' | 'repository'
@@ -402,8 +416,18 @@ export const App: React.FC<AppProps> = ({
       ? selectedSessionId
       : null;
 
+  // A real selected session always wins; the pending tool-choice empty state
+  // only matters when there's no real session to show yet (see
+  // `handleQuickStartSession`). Both open the same drawer slot.
+  const sessionPanelTargetOpen = !!effectiveSelectedSessionId || !!pendingToolChoiceBranchId;
+
   const [leftPanelTab, setLeftPanelTab] = useState<BoardTeammatePanelTab>('teammate');
   const [userSettingsOpen, setUserSettingsOpen] = useState(false);
+  // Deep-links the settings modal to a tool tab; cleared on close so a later
+  // plain settings click doesn't re-land on a stale tab.
+  const [userSettingsInitialTool, setUserSettingsInitialTool] = useState<
+    AgenticToolName | undefined
+  >(undefined);
   const [viewportWidth, setViewportWidth] = useState(() =>
     typeof window === 'undefined' ? 1440 : window.innerWidth
   );
@@ -484,7 +508,6 @@ export const App: React.FC<AppProps> = ({
   );
   const isHomeSurface = (isRootHomePath || pendingHomeNavigation) && !hasExplicitEntityTarget;
   const headerBoardId = isHomeSurface ? '' : currentBoardId;
-  const headerBoard = isHomeSurface ? undefined : currentBoard;
   const wasHomeSurfaceRef = useRef(isHomeSurface);
   const isLeavingHomeSurface = wasHomeSurfaceRef.current && !isHomeSurface;
   const [homeExitSidePanelDeferred, setHomeExitSidePanelDeferred] = useState(false);
@@ -669,10 +692,10 @@ export const App: React.FC<AppProps> = ({
   // parent's absolute width changes, so its own absolute pixel width would
   // drift along with the left panel.
   useEffect(() => {
-    if (sessionPanelRef.current && (effectiveSelectedSessionId || !eventStreamPanelCollapsed)) {
+    if (sessionPanelRef.current && (sessionPanelTargetOpen || !eventStreamPanelCollapsed)) {
       sessionPanelRef.current.resize(sessionPanelSizeWithinContent);
     }
-  }, [effectiveSelectedSessionId, sessionPanelSizeWithinContent, eventStreamPanelCollapsed]);
+  }, [sessionPanelTargetOpen, sessionPanelSizeWithinContent, eventStreamPanelCollapsed]);
 
   // URL⇄state sync renders via UrlStateBridge (in the JSX below) so its
   // whole-map subscriptions never wake the shell. Stable callbacks only.
@@ -814,6 +837,7 @@ export const App: React.FC<AppProps> = ({
   // With the flat entity-URL scheme there's no `closeSession` — closing
   // the panel is the same as navigating to the board we're already on.
   const handleCloseSessionPanel = useCallback(() => {
+    setPendingToolChoiceBranchId(null);
     if (currentBoardId) navigation.goToBoard(currentBoardId);
   }, [navigation, currentBoardId]);
 
@@ -827,13 +851,103 @@ export const App: React.FC<AppProps> = ({
     const sessionId = await onCreateSession?.(config, currentBoardId);
     setNewSessionBranchId(null);
 
-    // Route through the URL so useUrlState owns selection — setting
-    // selectedSessionId directly raced with the cleanup effect (and the
-    // state→URL self-heal) before the socket `created` event arrived.
+    // Select synchronously, then let the URL catch up. The create seam inserts
+    // the session into the store before returning, so `selectedSessionExists`
+    // is already true and the cleanup effect won't clear this — selecting
+    // directly no longer races. This keeps the drawer's SessionPanel mounted
+    // across the transition instead of blanking for the render it took
+    // `useUrlState` to derive selection from the new URL.
     if (sessionId) {
+      setSelectedSessionId(sessionId);
       navigation.goToSession(sessionId);
     }
   };
+
+  // Single mechanism behind both "pick a tool" entry points: the quick-start
+  // empty-state tiles (no `replacingSessionId`, session doesn't exist yet)
+  // and the in-drawer "Switch tool" affordance (`replacingSessionId` set —
+  // only ever offered on a session with zero completed tasks, so there's no
+  // conversation to lose). Creates a session with the chosen tool, swaps out
+  // the session it's replacing (if any) with a silent delete — no confirm
+  // dialog, this is an implementation detail of "switching", not a
+  // user-visible delete — and navigates to the result. Does NOT write back a
+  // "latest used" default; the only default is the explicit Settings one that
+  // `handleQuickStartSession` reads.
+  const chooseAgenticTool = useCallback(
+    async (branchId: string, tool: AgenticToolName, replacingSessionId?: string) => {
+      // Read the branch at call time instead of subscribing — `branchById` gets
+      // a new identity on every branch event (env heartbeats, git-state), which
+      // would otherwise churn this callback's identity and re-render every
+      // AppActions consumer on a live board.
+      const branch = agorStore.getState().branchById.get(branchId as Branch['branch_id']);
+      const mcpServerIds = resolveQuickStartMcpServerIds(user, branch);
+
+      const sessionId = await onCreateSession?.(
+        { branch_id: branchId, agent: tool, mcpServerIds },
+        currentBoardId
+      );
+      if (!sessionId) return null;
+
+      // Select the new session synchronously, in the same render that clears
+      // the picker, so the drawer never has a frame with neither target set.
+      // Routing selection through the URL alone leaves a one-render gap:
+      // `useUrlState` sets `selectedSessionId` a render after `goToSession`, so
+      // `effectiveSelectedSessionId` would be null while pending is already
+      // cleared → the drawer unmounts and fades back in. Safe because the
+      // create seam already inserted the session, so `selectedSessionExists` is
+      // true and the cleanup effect won't clear this. `goToSession` then just
+      // catches the URL up; its later `onSessionChange` re-sets the same id.
+      // Set selection BEFORE removing the replaced session (switch-tool path)
+      // so the new session already wins the ternary when the old one goes.
+      setPendingToolChoiceBranchId(null);
+      setSelectedSessionId(sessionId);
+      navigation.goToSession(sessionId);
+
+      if (replacingSessionId && client) {
+        try {
+          // `_swapReplace` tells the daemon this is a switch-tool swap, not a
+          // user-intentional delete — it refuses the removal (Conflict) if a
+          // task has landed on `replacingSessionId` since the swap was
+          // initiated (e.g. a collaborator or another tab prompted it in the
+          // TOCTOU window between opening the picker and clicking a tile),
+          // instead of silently cascade-deleting in-flight work.
+          await client
+            .service('sessions')
+            .remove(replacingSessionId, { query: { _swapReplace: true } });
+        } catch (error) {
+          console.error(`Failed to remove replaced session ${replacingSessionId}:`, error);
+          showError(
+            "Switched tools, but couldn't clean up the previous session — it may still be visible on this branch."
+          );
+        }
+      }
+
+      return sessionId;
+    },
+    [user, onCreateSession, currentBoardId, client, navigation, showError]
+  );
+
+  // Default "Add session" entry point. Always opens the tool-choice empty
+  // state (the tile picker) — a session's tool is always an explicit choice.
+  //
+  // The render ternary (`effectiveSelectedSessionId ? <SessionPanel/> :
+  // pendingToolChoiceBranchId ? <PendingToolChoicePanel/> : ...`) lets an
+  // already-open session win unconditionally, so setting
+  // pendingToolChoiceBranchId alone would be a no-op while a session is
+  // open — clicking "Add session" would do nothing visible. Route away from
+  // the open session via the URL first, same pattern as
+  // handleCloseSessionPanel / handleCreateSession: useUrlState's URL→state
+  // sync effect clears selectedSessionId once the URL stops pointing at a
+  // session, which is what lets the ternary fall through to the picker.
+  const handleQuickStartSession = useCallback(
+    (branchId: string) => {
+      if (effectiveSelectedSessionId) {
+        navigation.goToBranch(branchId);
+      }
+      setPendingToolChoiceBranchId(branchId);
+    },
+    [effectiveSelectedSessionId, navigation]
+  );
 
   const handleCreateBranch = async (config: BranchTabConfig) => {
     // Thread board placement (boardId + position) through the create
@@ -915,7 +1029,7 @@ export const App: React.FC<AppProps> = ({
       branch_id: branch.branch_id,
       agent: result.agent,
       agenticToolPresetId: result.agenticToolPresetId,
-      title: `${result.emoji ? `${result.emoji} ` : ''}${result.displayName} bootstrap`,
+      title: buildTeammateOnboardingSessionTitle(result),
       initialPrompt: buildTeammateBootstrapPrompt({
         displayName: result.displayName,
         emoji: result.emoji,
@@ -995,6 +1109,7 @@ export const App: React.FC<AppProps> = ({
       // Route through URL nav so deep links / back-forward / cross-board
       // recenter all funnel through the same pipe. setSelectedSessionId
       // happens via useUrlState's onSessionChange callback.
+      setPendingToolChoiceBranchId(null);
       navigation.goToSession(sessionId);
     },
     [client, navigation]
@@ -1047,6 +1162,14 @@ export const App: React.FC<AppProps> = ({
         [effectiveSelectedSessionId]
       )
     ) ?? EMPTY_STRING_ARRAY;
+
+  // Narrow per-id subscription for the quick-start picker's branch — only
+  // patches to that specific branch (or a socket-in-flight arrival) wake the
+  // shell, not every unrelated branch event.
+  const pendingToolChoiceBranch =
+    useAgorStore(
+      useMemo(() => makeBranchSelector(pendingToolChoiceBranchId), [pendingToolChoiceBranchId])
+    ) ?? null;
 
   // Sync the actual state when a session disappears (for URL, localStorage, etc.).
   // The rendering already uses effectiveSelectedSessionId so this is mostly
@@ -1131,8 +1254,8 @@ export const App: React.FC<AppProps> = ({
   // Comment-derived header scalars. Subscribing to the derived number/boolean
   // (instead of the comment map) keeps comment edits that don't change them —
   // and all comments on other boards — from waking the shell. Shared between
-  // AppHeader's comments button and the collapsed rail's Comments item so
-  // both surfaces carry the same badge.
+  // the expanded panel's Comments tab and the collapsed rail's Comments item
+  // so both surfaces carry the same badge.
   const currentUserName = user?.name || user?.email?.split('@')[0] || '';
   const unreadCommentsCount = useAgorStore(
     useMemo(() => makeUnreadCommentCountSelector(currentBoardId), [currentBoardId])
@@ -1168,6 +1291,7 @@ export const App: React.FC<AppProps> = ({
   const stableOnStartEnvironment = useStableCallback(onStartEnvironment);
   const stableOnStopEnvironment = useStableCallback(onStopEnvironment);
   const stableOnNukeEnvironment = useStableCallback(onNukeEnvironment);
+  const stableChooseAgenticTool = useStableCallback(chooseAgenticTool);
 
   // Modal-opener handlers shared by the context value and panel props.
   const handleViewLogs = useCallback((branchId: string) => setLogsModalBranchId(branchId), []);
@@ -1200,6 +1324,12 @@ export const App: React.FC<AppProps> = ({
       onSessionClick: handleSessionClick,
       onOpenBranch: handleOpenBranchModal,
       onOpenTerminal: canOpenTerminal ? handleOpenTerminal : undefined,
+      onChooseAgenticTool: stableChooseAgenticTool,
+      availableAgents,
+      onOpenAgenticToolSettings: (tool: AgenticToolName) => {
+        setUserSettingsInitialTool(tool);
+        setUserSettingsOpen(true);
+      },
     }),
     [
       stableOnSendPrompt,
@@ -1218,6 +1348,8 @@ export const App: React.FC<AppProps> = ({
       handleOpenBranchModal,
       handleOpenTerminal,
       canOpenTerminal,
+      stableChooseAgenticTool,
+      availableAgents,
     ]
   );
 
@@ -1240,11 +1372,11 @@ export const App: React.FC<AppProps> = ({
   const eventStreamBranchActions = useMemo(
     () => ({
       onSessionClick: handleSessionClick,
-      onCreateSession: (branchId: string) => setNewSessionBranchId(branchId),
+      onCreateSession: (branchId: string) => handleQuickStartSession(branchId),
       onOpenSettings: (branchId: string) => setBranchModalBranchId(branchId),
       onNukeEnvironment: stableOnNukeEnvironment,
     }),
-    [handleSessionClick, stableOnNukeEnvironment]
+    [handleSessionClick, handleQuickStartSession, stableOnNukeEnvironment]
   );
 
   // Header action handlers, frozen so the memoized AppHeader's React.memo bailout
@@ -1298,18 +1430,13 @@ export const App: React.FC<AppProps> = ({
           connected={connected}
           connecting={connecting}
           onMenuClick={handleToggleBoardPanel}
-          onCommentsClick={handleOpenCommentsPanel}
           onEventStreamClick={handleEventStreamClick}
           onSettingsClick={handleOpenSettingsClick}
           onUserSettingsClick={handleOpenUserSettings}
           onThemeEditorClick={handleOpenThemeEditor}
           onLogout={stableOnLogout}
           onRetryConnection={stableOnRetryConnection}
-          currentBoardName={headerBoard?.name}
-          currentBoardIcon={headerBoard?.icon}
-          unreadCommentsCount={unreadCommentsCount}
           eventStreamEnabled={eventStreamEnabled}
-          hasUserMentions={hasUserMentions}
           currentBoardId={headerBoardId}
           onBoardChange={navigation.goToBoard}
           onHomeClick={handleHomeClick}
@@ -1365,13 +1492,15 @@ export const App: React.FC<AppProps> = ({
                   board={currentBoard || null}
                   activeTab={leftPanelTab}
                   onTabChange={setLeftPanelTab}
+                  unreadCommentsCount={unreadCommentsCount}
+                  hasUserMentions={hasUserMentions}
                   primaryTeammateBranch={primaryTeammateBranch}
                   primaryTeammateRepo={primaryTeammateRepo}
                   primaryTeammateInaccessible={primaryTeammateInaccessible}
                   currentUserId={user?.user_id}
                   selectedSessionId={effectiveSelectedSessionId}
                   onSessionClick={handleSessionClick}
-                  onCreateSession={setNewSessionBranchId}
+                  onCreateSession={handleQuickStartSession}
                   onForkSession={stableOnForkSession}
                   onSpawnSession={stableOnSpawnSession}
                   onArchiveOrDelete={stableOnArchiveOrDeleteBranch}
@@ -1457,9 +1586,7 @@ export const App: React.FC<AppProps> = ({
                 <Panel
                   id="canvas-panel"
                   order={1}
-                  defaultSize={
-                    effectiveSelectedSessionId ? 100 - sessionPanelSizeWithinContent : 100
-                  }
+                  defaultSize={sessionPanelTargetOpen ? 100 - sessionPanelSizeWithinContent : 100}
                   minSize={CANVAS_MIN_SIZE_PERCENT}
                 >
                   <div style={{ position: 'relative', overflow: 'hidden', height: '100%' }}>
@@ -1494,7 +1621,7 @@ export const App: React.FC<AppProps> = ({
                         onSpawnSession={stableOnSpawnSession}
                         onUpdateSessionMcpServers={stableOnUpdateSessionMcpServers}
                         onOpenSettings={setSessionSettingsId}
-                        onCreateSessionForBranch={setNewSessionBranchId}
+                        onCreateSessionForBranch={handleQuickStartSession}
                         onOpenBranch={setBranchModalBranchId}
                         onArchiveOrDeleteBranch={stableOnArchiveOrDeleteBranch}
                         onOpenTerminal={canOpenTerminal ? handleOpenTerminal : undefined}
@@ -1519,7 +1646,7 @@ export const App: React.FC<AppProps> = ({
                     )}
                   </div>
                 </Panel>
-                {(effectiveSelectedSessionId || !eventStreamPanelCollapsed) && (
+                {(sessionPanelTargetOpen || !eventStreamPanelCollapsed) && (
                   <>
                     <PanelResizeHandle
                       style={{
@@ -1557,6 +1684,20 @@ export const App: React.FC<AppProps> = ({
                           sessionMcpServerIds={selectedSessionMcpServerIds}
                           open={!!effectiveSelectedSessionId}
                           onClose={handleCloseSessionPanel}
+                          uploadPolicy={uploadPolicy}
+                        />
+                      ) : pendingToolChoiceBranchId ? (
+                        <PendingToolChoicePanel
+                          branch={pendingToolChoiceBranch}
+                          availableAgents={availableAgents}
+                          onChoose={async (tool) => {
+                            await chooseAgenticTool(pendingToolChoiceBranchId, tool);
+                          }}
+                          onClose={handleCloseSessionPanel}
+                          onAdvancedSetup={() => {
+                            setNewSessionBranchId(pendingToolChoiceBranchId);
+                            setPendingToolChoiceBranchId(null);
+                          }}
                         />
                       ) : (
                         <EventStreamPanel
@@ -1592,6 +1733,7 @@ export const App: React.FC<AppProps> = ({
             branch={newSessionBranch || undefined}
             currentUser={user}
             client={client}
+            uploadPolicy={uploadPolicy}
           />
         )}
         <SettingsModal
@@ -1720,9 +1862,10 @@ export const App: React.FC<AppProps> = ({
         <ThemeEditorModal open={themeEditorOpen} onClose={() => setThemeEditorOpen(false)} />
         <UserSettingsModal
           open={effectiveUserSettingsOpen}
-          initialTab={initialUserSettingsTab}
+          initialTab={userSettingsInitialTool ?? initialUserSettingsTab}
           onClose={() => {
             setUserSettingsOpen(false);
+            setUserSettingsInitialTool(undefined);
             onUserSettingsClose?.();
           }}
           user={user || null}
@@ -1731,6 +1874,7 @@ export const App: React.FC<AppProps> = ({
           onUpdate={onUpdateUser}
           onRestartOnboarding={async () => {
             setUserSettingsOpen(false);
+            setUserSettingsInitialTool(undefined);
             onUserSettingsClose?.();
             await onRestartOnboarding?.();
           }}

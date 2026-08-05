@@ -19,6 +19,7 @@ import {
 import { resolveSessionDefaults } from '@agor/core/sessions';
 import {
   AGENTIC_TOOL_CAPABILITIES,
+  AGENTIC_TOOL_NAMES,
   type AgenticToolName,
   type Board,
   getSessionType,
@@ -30,11 +31,9 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { SessionsServiceImpl } from '../../declarations.js';
 import type { SessionParams } from '../../services/sessions.js';
+import { requireActiveAgenticTool } from '../../utils/agentic-tool-runtime.js';
 import { ensureCanPromptTargetSession } from '../../utils/branch-authorization.js';
-import { inspectBranchViaExecutor } from '../../utils/branch-inspect.js';
 import { emitServiceEvent } from '../../utils/emit-service-event.js';
-import { resolveExecutorReadAsUser } from '../../utils/executor-read-impersonation.js';
-import { serviceTokenScopeForParams } from '../../utils/spawn-executor.js';
 import {
   resolveBoardId,
   resolveBranchId,
@@ -389,7 +388,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     'agor_sessions_get_current_context',
     {
       description:
-        'Get a lean orientation snapshot for the current session in ONE call. Returns deduplicated context: session identity, user, git state, branch (zone, issue/PR, notes, environment), board (with zones), repo (slug, default branch), genealogy, and sibling sessions. Every field appears exactly once. Use get_current or entity-specific tools for full details.',
+        'Get a lean orientation snapshot for the current session in ONE call. Returns deduplicated context: session identity, user, latest task Git boundaries, branch (zone, issue/PR, notes, environment), board (with zones), repo (slug, default branch), genealogy, and sibling sessions. Every field appears exactly once. Use get_current or entity-specific tools for full details.',
       annotations: { readOnlyHint: true },
       inputSchema: z.object({
         includeSiblings: z
@@ -429,6 +428,28 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         user_role: user.role,
       };
 
+      const latestTaskId = session.tasks?.at(-1);
+      if (latestTaskId) {
+        try {
+          const latestTask = await ctx.app
+            .service('tasks')
+            .get(latestTaskId, ctx.baseServiceParams);
+          const gitState = latestTask.git_state;
+          result.latest_task_git_start = {
+            ref: gitState.ref_at_start,
+            sha: gitState.sha_at_start,
+          };
+          result.latest_task_git_end = gitState.sha_at_end
+            ? {
+                ref: gitState.ref_at_end ?? null,
+                sha: gitState.sha_at_end,
+              }
+            : null;
+        } catch {
+          // The latest task may have been removed or be outside the caller's tenant scope.
+        }
+      }
+
       // Creator info only when different from authenticated user
       if (session.created_by && session.created_by !== ctx.userId) {
         try {
@@ -451,11 +472,6 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           : 'root';
       result.parent_session_id = gen?.parent_session_id || gen?.forked_from_session_id || null;
       result.children_count = gen?.children?.length || 0;
-
-      // Git state (flat)
-      result.branch = session.git_state?.ref || null;
-      result.base_sha = session.git_state?.base_sha || null;
-      result.current_sha = session.git_state?.current_sha || null;
 
       if (session.branch_id) {
         try {
@@ -577,7 +593,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           'Optional title for the session (defaults to first 100 chars of prompt)'
         ),
         agenticTool: z
-          .enum(['claude-code', 'claude-code-cli', 'codex', 'gemini', 'opencode', 'cursor'])
+          .enum(AGENTIC_TOOL_NAMES)
           .optional()
           .describe('Which agent to use for the subsession (defaults to same as parent)'),
         enableCallback: z
@@ -666,7 +682,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             'How to route the work: continue (add to existing session), fork (create sibling session), subsession (create child session), btw (ephemeral fork — works even on running sessions, auto-callbacks result to caller, auto-archives when done)'
           ),
         agenticTool: z
-          .enum(['claude-code', 'claude-code-cli', 'codex', 'gemini', 'cursor'])
+          .enum(AGENTIC_TOOL_NAMES)
           .optional()
           .describe(
             'Agent for subsession (subsession mode only, defaults to parent agent). Fork mode always uses parent agent.'
@@ -717,7 +733,8 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         const targetSession = await ctx.app
           .service('sessions')
           .get(sessionId, ctx.baseServiceParams);
-        const caps = AGENTIC_TOOL_CAPABILITIES[targetSession.agentic_tool as AgenticToolName];
+        const targetTool = requireActiveAgenticTool(targetSession.agentic_tool);
+        const caps = AGENTIC_TOOL_CAPABILITIES[targetTool];
         if (caps && !caps.supportsSessionFork) {
           return textResult({
             error: `${targetSession.agentic_tool} does not support session forking. Use mode "subsession" instead to delegate work to a fresh session.`,
@@ -918,7 +935,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           'Branch ID where the session will run (required)'
         ),
         agenticTool: z
-          .enum(['claude-code', 'claude-code-cli', 'codex', 'gemini', 'cursor'])
+          .enum(AGENTIC_TOOL_NAMES)
           .describe('Which agent to use for this session (required)'),
         title: mcpOptionalNonEmptyString('title', 'Session title (optional)'),
         description: mcpOptionalString('description', 'Session description (optional)'),
@@ -981,16 +998,6 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
 
       // Get branch to extract repo context
       const branch = await ctx.app.service('branches').get(args.branchId, ctx.baseServiceParams);
-
-      // Get current git state via executor so the daemon does not run git in the branch checkout.
-      const asUser = await runWithMcpTenantDatabaseScope(ctx, (db) =>
-        resolveExecutorReadAsUser(db, user)
-      );
-      const { currentSha, currentRef } = await inspectBranchViaExecutor(ctx.app, branch.branch_id, {
-        asUser,
-        logPrefix: `[mcp.sessions.create ${branch.name}]`,
-        serviceTokenScope: serviceTokenScopeForParams(ctx.baseServiceParams),
-      });
 
       // Resolve permission_config / model_config / inherited mcp_server_ids
       // from the explicit MCP args (highest priority) > user defaults > system
@@ -1129,11 +1136,6 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         ...(modelConfig && { model_config: modelConfig }),
         ...(Object.keys(callbackConfig).length > 0 && { callback_config: callbackConfig }),
         contextFiles: args.contextFiles || [],
-        git_state: {
-          ref: currentRef,
-          base_sha: currentSha,
-          current_sha: currentSha,
-        },
         genealogy: {
           ...(resolvedParentSessionId && { parent_session_id: resolvedParentSessionId }),
           children: [],
@@ -1582,9 +1584,8 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
   //
   // Discovery tool so MCP-driven agents can find valid `model` strings without
   // having to scrape tool descriptions. Sourced from the same in-process model
-  // registries the UI uses (packages/core/src/models/*), so when a new model
-  // ships and the registry is updated, this tool returns it on the very next
-  // call — no MCP-tool-description redeploy needed.
+  // registries the UI uses (packages/core/src/models/*). This reads the
+  // registry loaded by the running daemon; it is not provider discovery.
   //
   // Caveats:
   //   - Gemini's authoritative list is fetched live from the Google API per
@@ -1593,16 +1594,16 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
   //   - Copilot and Cursor have dynamic discovery exposed via /copilot-models
   //     and /cursor-models in the daemon. Static fallbacks are exposed here.
   //   - OpenCode is a provider+model matrix and doesn't have a single static
-  //     list — it's exposed via the branch config UI today.
+  //     list. Its entry explains that discovery happens after provider choice.
   server.registerTool(
     'agor_models_list',
     {
       description:
-        'List valid model IDs grouped by agenticTool. Use this to discover what to pass for `modelConfig` (or its string shorthand) in agor_sessions_create / spawn / prompt. Sourced live from the daemon model registry — when new models ship and the registry is updated, this tool returns them on the next call.',
+        'List selectable model aliases grouped by agenticTool. Use this to discover what to pass for `modelConfig` (or its string shorthand) in agor_sessions_create / spawn / prompt. Lists the registry loaded by the running daemon; provider-specific exact IDs may be account-dependent.',
       annotations: { readOnlyHint: true },
       inputSchema: z.object({
         agenticTool: z
-          .enum(['claude-code', 'claude-code-cli', 'codex', 'copilot', 'gemini', 'cursor'])
+          .enum(AGENTIC_TOOL_NAMES)
           .optional()
           .describe('Filter to a single agentic tool. Omit to return all tools.'),
       }),
@@ -1619,6 +1620,8 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         id,
         displayName: meta.name,
         description: meta.description,
+        status: meta.status,
+        availability: meta.availability,
       }));
 
       const copilotModels = Object.entries(COPILOT_MODEL_METADATA).map(([id, meta]) => ({
@@ -1644,28 +1647,25 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           models: claudeModels,
           note: 'Claude models are also fetched live via /claude-models (uses the Anthropic Models API). This is the static fallback.',
         },
-        // Claude Code CLI shares the same Anthropic model lineup as the
-        // SDK path; surface the same list so MCP clients can pass any
-        // valid claude id to either adapter.
-        'claude-code-cli': {
-          default: DEFAULT_CLAUDE_MODEL,
-          models: claudeModels,
-          note: 'Claude models are also fetched live via /claude-models (uses the Anthropic Models API). This is the static fallback.',
-        },
         codex: {
           default: DEFAULT_CODEX_MODEL,
           models: codexModels,
-          note: 'Codex defaults to gpt-5.6-sol; omit modelConfig unless a specific model is required. Use gpt-5.6-terra for balanced everyday work or gpt-5.6-luna for clear, high-volume tasks. Legacy Codex aliases are intentionally omitted from this selectable list.',
-        },
-        copilot: {
-          default: DEFAULT_COPILOT_MODEL,
-          models: copilotModels,
-          note: "Copilot models are also fetched live via /copilot-models (uses the SDK's listModels()). This is the static fallback — BYOK-configured models may not appear here.",
+          note: 'Latest models are listed first; omit modelConfig to use the default. Current models are supported defaults; older entries marked provider-dependent may vary by Codex account and are checked by Codex at startup. This is Agor’s known-model registry, not a dynamic Codex CLI/provider listing. Provider-specific IDs absent from this list must be passed with mode "exact". Known unsupported legacy aliases are omitted.',
         },
         gemini: {
           default: DEFAULT_GEMINI_MODEL,
           models: geminiModels,
           note: 'Gemini models are normally fetched live from the Google API per-user. This is the static fallback list — newer models may exist.',
+        },
+        opencode: {
+          default: null,
+          models: [],
+          note: 'OpenCode models are provider-specific and are discovered after selecting a provider. Pass both modelConfig.provider and modelConfig.model from the OpenCode provider catalog.',
+        },
+        copilot: {
+          default: DEFAULT_COPILOT_MODEL,
+          models: copilotModels,
+          note: "Copilot models are also fetched live via /copilot-models (uses the SDK's listModels()). This is the static fallback — BYOK-configured models may not appear here.",
         },
         cursor: {
           default: DEFAULT_CURSOR_MODEL,
@@ -1678,7 +1678,10 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           ],
           note: "Cursor models are also fetched live via /cursor-models (uses @cursor/sdk's Cursor.models.list()). This is the static fallback — account-specific models may not appear here.",
         },
-      };
+      } satisfies Record<
+        AgenticToolName,
+        { default: string | null; models: unknown[]; note: string }
+      >;
 
       if (args.agenticTool) {
         return textResult({ [args.agenticTool]: all[args.agenticTool] });

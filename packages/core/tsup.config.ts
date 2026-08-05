@@ -1,25 +1,28 @@
-import { cpSync } from 'node:fs';
+import { chmodSync, cpSync } from 'node:fs';
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
   entry: {
     index: 'src/index.ts',
     'analytics/index': 'src/analytics/index.ts', // Backend analytics logger and plugin resolution
-    'telemetry/index': 'src/telemetry/index.ts', // Open-source install telemetry helpers
+    'telemetry/index': 'src/telemetry/index.ts', // Community install telemetry helpers
     'types/index': 'src/types/index.ts',
     'db/index': 'src/db/index.ts',
     'db/session-guard': 'src/db/session-guard.ts', // Defensive programming for deleted sessions
+    'tenant-portability/index': 'src/tenant-portability/index.ts',
     'git/index': 'src/git/index.ts',
     'git/pure': 'src/git/pure.ts',
     'git/exec': 'src/git/exec.ts',
     'api/index': 'src/api/index.ts',
     'claude/index': 'src/claude/index.ts',
-    'claude-cli/index': 'src/claude-cli/index.ts', // Pure utilities for the Claude Code CLI adapter (path slug, event types, JSONL translator)
+    'codex/auth-file': 'src/codex/auth-file.ts', // Pure Codex auth.json schema inspection
     'config/index': 'src/config/index.ts',
+    'config/agor-yml': 'src/config/agor-yml.ts', // Node-only .agor.yml file I/O
     'config/browser': 'src/config/browser.ts', // Browser-safe config utilities
     'permissions/index': 'src/permissions/index.ts',
     'feathers/index': 'src/feathers/index.ts', // FeathersJS runtime re-exports
     'lib/feathers-validation': 'src/lib/feathers-validation.ts', // FeathersJS query validation schemas
+    'lib/validation': 'src/lib/validation.ts', // Node-only filesystem validation for executors
     'templates/handlebars-helpers': 'src/templates/handlebars-helpers.ts', // Handlebars helpers
     'templates/session-context': 'src/templates/session-context.ts', // Agor system prompt rendering
     'templates/spawn-subsession-template': 'src/templates/spawn-subsession-template.ts', // Spawn-subsession meta-prompt
@@ -56,6 +59,7 @@ export default defineConfig({
     'tools/mcp/oauth-token-expiry': 'src/tools/mcp/oauth-token-expiry.ts', // MCP OAuth token expiry resolution cascade
     'unix/index': 'src/unix/index.ts', // Unix group management utilities for branch isolation
     'local-actions/index': 'src/local-actions/index.ts', // Shared host-local admin actions
+    'local-actions/identity': 'src/local-actions/identity.ts', // Daemon host identity/group actions only
     'mcp/index': 'src/mcp/index.ts', // MCP template resolution utilities
     'gateway/index': 'src/gateway/index.ts', // Gateway platform connectors (Slack, etc.)
     'gateway/connectors/slack-manifest': 'src/gateway/connectors/slack-manifest.ts', // Browser-safe Slack manifest/scope derivation (no connector deps)
@@ -89,6 +93,9 @@ export default defineConfig({
 
     // Copy template files to dist so they're available at runtime
     cpSync('src/templates/agor-system-prompt.md', 'dist/templates/agor-system-prompt.md');
+    // Executor processes can run as a different Unix user. Do not preserve the
+    // group-private mode inherited from an ACL-managed development worktree.
+    chmodSync('dist/templates/agor-system-prompt.md', 0o644);
     console.log('✅ Copied agor-system-prompt.md template to dist/');
   },
 });

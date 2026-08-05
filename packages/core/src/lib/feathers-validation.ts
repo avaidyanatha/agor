@@ -8,6 +8,7 @@
 import { Ajv } from '@feathersjs/schema';
 import type { TObject, TProperties } from '@feathersjs/typebox';
 import { getValidator, Type } from '@feathersjs/typebox';
+import { AGENTIC_TOOL_NAMES, PERSISTED_AGENTIC_TOOL_NAMES } from '../types/agentic-tool';
 
 /**
  * Query validator with type coercion enabled
@@ -40,16 +41,11 @@ export const CommonSchemas = {
     Type.Literal('failed'),
   ]),
 
-  // Agentic tool enum
-  agenticTool: Type.Union([
-    Type.Literal('claude-code'),
-    Type.Literal('codex'),
-    Type.Literal('gemini'),
-    Type.Literal('opencode'),
-    Type.Literal('copilot'),
-    Type.Literal('claude-code-cli'),
-    Type.Literal('cursor'),
-  ]),
+  // Active agentic tool enum
+  agenticTool: Type.Union(AGENTIC_TOOL_NAMES.map((tool) => Type.Literal(tool))),
+
+  // Session query compatibility: historical rows keep their removed tool id.
+  persistedAgenticTool: Type.Union(PERSISTED_AGENTIC_TOOL_NAMES.map((tool) => Type.Literal(tool))),
 
   // Permission mode enum - union of all native SDK modes
   permissionMode: Type.Union([
@@ -103,7 +99,7 @@ export const sessionQuerySchema = createQuerySchema(
   Type.Object({
     session_id: Type.Optional(CommonSchemas.uuid),
     status: Type.Optional(CommonSchemas.sessionStatus),
-    agentic_tool: Type.Optional(CommonSchemas.agenticTool),
+    agentic_tool: Type.Optional(CommonSchemas.persistedAgenticTool),
     board_id: Type.Optional(CommonSchemas.uuid),
     branch_id: Type.Optional(CommonSchemas.uuid),
     parent_session_id: Type.Optional(CommonSchemas.uuid),
@@ -113,6 +109,11 @@ export const sessionQuerySchema = createQuerySchema(
     archived: Type.Optional(CommonSchemas.boolean),
     created_at: Type.Optional(CommonSchemas.timestamp),
     updated_at: Type.Optional(CommonSchemas.timestamp),
+    // Marks a `remove` as the delete half of a "switch tool" swap so the
+    // service can refuse it if a task landed on the session mid-swap. Declared
+    // here so the query validator (`removeAdditional: 'all'`) doesn't strip it
+    // before the service's guard sees it.
+    _swapReplace: Type.Optional(CommonSchemas.boolean),
   })
 );
 
@@ -127,6 +128,7 @@ export const taskQuerySchema = createQuerySchema(
       Type.Union([
         Type.Literal('queued'),
         Type.Literal('created'),
+        Type.Literal('dispatching'),
         Type.Literal('running'),
         Type.Literal('stopping'),
         Type.Literal('awaiting_permission'),

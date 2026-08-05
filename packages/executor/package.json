@@ -2,6 +2,7 @@
   "name": "@agor/executor",
   "version": "0.1.0",
   "description": "Agor executor process - isolated execution environment",
+  "license": "BUSL-1.1",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -11,8 +12,9 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "test:runtime": "node scripts/runtime-smoke.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run && pnpm test:runtime",
     "test:watch": "vitest"
   },
   "dependencies": {
@@ -21,7 +23,7 @@
     "@cursor/sdk": "^1.0.23",
     "@github/copilot-sdk": "^0.2.2",
     "@opencode-ai/sdk": "^1.2.20",
-    "diff": "^7.0.0",
+    "diff": "^8.0.3",
     "node-pty": "^1.2.0-beta.12",
     "zod": "^4.4.3"
   },

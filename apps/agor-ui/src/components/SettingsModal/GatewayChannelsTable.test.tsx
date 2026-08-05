@@ -47,13 +47,45 @@ vi.mock('../AgentSelectionGrid', () => ({
     </div>
   ),
 }));
-vi.mock('../AgenticToolConfigForm', () => ({
-  AgenticToolConfigForm: () => <div data-testid="agent-config" />,
-}));
-vi.mock('../AgenticToolConfigurationPicker', () => ({
-  INLINE_AGENTIC_CONFIGURATION: '__inline__',
-  AgenticToolConfigurationPicker: () => <div data-testid="agent-config" />,
-}));
+vi.mock('../AgenticToolConfigForm', async () => {
+  const actual = await vi.importActual<typeof import('../AgenticToolConfigForm')>(
+    '../AgenticToolConfigForm'
+  );
+  return {
+    ...actual,
+    AgenticToolConfigForm: () => <div data-testid="agent-config" />,
+  };
+});
+vi.mock('../AgenticToolConfigurationPicker', async () => {
+  const { Form } = await vi.importActual<typeof import('antd')>('antd');
+  const EffortField = ({
+    value,
+    onChange,
+  }: {
+    value?: string;
+    onChange?: (value: string | undefined) => void;
+  }) => (
+    <select
+      aria-label="gateway-effort"
+      value={value ?? ''}
+      onChange={(event) => onChange?.(event.target.value || undefined)}
+    >
+      <option value="">Inherited</option>
+      <option value="medium">Medium</option>
+      <option value="xhigh">X-High</option>
+    </select>
+  );
+  return {
+    INLINE_AGENTIC_CONFIGURATION: '__inline__',
+    AgenticToolConfigurationPicker: () => (
+      <div data-testid="agent-config">
+        <Form.Item name="effort" noStyle>
+          <EffortField />
+        </Form.Item>
+      </div>
+    ),
+  };
+});
 
 function renderWithProviders(ui: React.ReactElement) {
   return render(
@@ -149,6 +181,21 @@ function clickButton(text: RegExp) {
 }
 /** Drain microtasks so a Form.validateFields()-gated step transition settles. */
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/**
+ * Open the (real) channel-type antd Select and pick a platform by its option
+ * label. `getByRole('combobox')` scans the whole antd-modal DOM computing roles
+ * (~250ms per call in jsdom, same class of cost as the button-name lookup above)
+ * — enough to push these Select-opening wizard tests toward the CI timeout — so
+ * we grab the same role-bearing node via a plain `[role]` querySelector, which
+ * skips the accessibility-tree walk.
+ */
+function selectChannelType(label: string) {
+  const combobox = document.querySelector('[role="combobox"]');
+  if (!combobox) throw new Error('No channel-type Select found');
+  fireEvent.mouseDown(combobox);
+  fireEvent.click(screen.getByText(label));
+}
 
 /** Fill the universal "Channel" step (step 0) and advance to "Options" (step 1). */
 async function advanceToOptions() {
@@ -625,6 +672,80 @@ describe('GatewayChannelsTable Slack edit mode', () => {
     });
   });
 
+  it('requires an explicit supported-tool choice before saving a historical channel', async () => {
+    const channel: GatewayChannel = {
+      ...makeSlackChannel(),
+      agentic_config: { agent: 'claude-code-cli' },
+    };
+    const onUpdate = vi.fn();
+
+    renderEditTable(null, channel, { onUpdate });
+
+    expect(screen.getByText('This channel uses a removed agentic tool')).toBeInTheDocument();
+    expect(queryButton(/^Save$/)).toBeDisabled();
+    expect(onUpdate).not.toHaveBeenCalled();
+
+    expandPanel('Agent Configuration');
+    clickButton(/^codex$/);
+    expect(queryButton(/^Save$/)).toBeEnabled();
+    clickButton(/^Save$/);
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    expect(onUpdate.mock.calls[0][1]).toMatchObject({
+      agentic_config: { agent: 'codex' },
+    });
+  });
+
+  it('rehydrates and persists a Codex reasoning-effort override', async () => {
+    const channel = {
+      ...makeSlackChannel(),
+      agentic_config: {
+        agent: 'codex',
+        modelConfig: { mode: 'alias', model: 'gpt-5.6-sol', effort: 'medium' },
+      },
+    } as unknown as GatewayChannel;
+    const onUpdate = vi.fn();
+
+    renderEditTable(null, channel, { onUpdate });
+    expandPanel('Agent Configuration');
+
+    const effort = screen.getByLabelText('gateway-effort');
+    expect(effort).toHaveValue('medium');
+    fireEvent.change(effort, { target: { value: 'xhigh' } });
+    clickButton(/^Save$/);
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    expect(onUpdate.mock.calls[0][1]).toMatchObject({
+      agentic_config: {
+        agent: 'codex',
+        modelConfig: { mode: 'alias', model: 'gpt-5.6-sol', effort: 'xhigh' },
+      },
+    });
+  });
+
+  it('clears stale model and effort fields when switching to an agent without defaults', async () => {
+    const channel = {
+      ...makeSlackChannel(),
+      agentic_config: {
+        agent: 'codex',
+        modelConfig: { mode: 'alias', model: 'gpt-5.6-sol', effort: 'medium' },
+      },
+      mcp_server_ids: ['mcp-server-1'],
+    } as unknown as GatewayChannel;
+    const onUpdate = vi.fn();
+
+    renderEditTable(null, channel, { currentUser: makeUser(), onUpdate });
+    expandPanel('Agent Configuration');
+    clickButton(/^claude-code$/);
+    await waitFor(() => expect(screen.getByLabelText('gateway-effort')).toHaveValue(''));
+    clickButton(/^Save$/);
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    const update = onUpdate.mock.calls[0][1];
+    expect(update.agentic_config).not.toHaveProperty('modelConfig');
+    expect(update.mcp_server_ids).toEqual(['mcp-server-1']);
+  });
+
   it("applies the target agent's defaults when switching agents and back, instead of silently keeping stale fields", async () => {
     // A value-based guard (selectedAgent === persisted agent) would treat
     // switching away and back as "no-op" and skip re-applying defaults,
@@ -665,8 +786,7 @@ describe('GatewayChannelsTable GitHub create wizard', () => {
     clickButton(/Add Channel/);
 
     // Switch the channel type to GitHub via the (real) antd Select.
-    fireEvent.mouseDown(screen.getByRole('combobox'));
-    fireEvent.click(screen.getByText('GitHub'));
+    selectChannelType('GitHub');
 
     // Step 0 (Channel): GitHub picks identity later, so only name + branch here.
     fireEvent.change(screen.getByPlaceholderText('e.g., Team Slack, Personal Discord'), {
@@ -687,10 +807,12 @@ describe('GatewayChannelsTable GitHub create wizard', () => {
       target: { value: 'pem-body' },
     });
     clickButton(/^Continue$/);
-    await flush();
 
     // Step 3 (Configure): watch repos (tags Select, tokenized via comma) + identity.
-    const watchRepos = document.querySelector('#github_watch_repos') as HTMLInputElement;
+    // Form validation gates this transition asynchronously. Waiting for the
+    // destination control is deterministic under CI load; a single event-loop
+    // tick can run before React has committed the next step.
+    const watchRepos = await screen.findByLabelText('Watch Repos');
     fireEvent.change(watchRepos, { target: { value: 'preset-io/agor,' } });
     fireEvent.change(screen.getByLabelText('user-select'), { target: { value: 'user-1' } });
 
@@ -704,7 +826,11 @@ describe('GatewayChannelsTable GitHub create wizard', () => {
       target_branch_id: 'branch-1',
       config: { app_id: 111, watch_repos: ['preset-io/agor'] },
     });
-  });
+    // These two wizard tests are the only ones that open the real channel-type
+    // Select; that plus the 4-step form mount makes them the heaviest in the
+    // file. Give them extra headroom over the global 15s so CI load spikes
+    // (which already pushed this test past 15s once) don't flake them.
+  }, 30_000);
 });
 
 describe('GatewayChannelsTable Teams create wizard', () => {
@@ -714,8 +840,7 @@ describe('GatewayChannelsTable Teams create wizard', () => {
     clickButton(/Add Channel/);
 
     // Switch the channel type to Microsoft Teams via the (real) antd Select.
-    fireEvent.mouseDown(screen.getByRole('combobox'));
-    fireEvent.click(screen.getByText('Microsoft Teams'));
+    selectChannelType('Microsoft Teams');
 
     // Step 0 for Teams includes the generic "Post messages as" identity.
     fireEvent.change(screen.getByPlaceholderText('e.g., Team Slack, Personal Discord'), {
@@ -748,5 +873,7 @@ describe('GatewayChannelsTable Teams create wizard', () => {
       agor_user_id: 'user-1',
       config: { app_id: 'app-123', tenant_id: 'tenant-123' },
     });
-  });
+    // Same headroom rationale as the GitHub wizard test above: opens the real
+    // channel-type Select, so it's among the heaviest tests in this file.
+  }, 30_000);
 });

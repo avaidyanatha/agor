@@ -28,7 +28,7 @@ function scopedPayload(context: HookContext): ExecutorSessionTokenPayload | null
   // on the connection while dropping the decoded JWT payload. Treat those
   // fields as executor scope only when they came from JWT auth and carry a task
   // claim; normal user/API-key auth must continue through unscoped.
-  if (params.authentication?.strategy === 'jwt' && params.task_id) {
+  if (params.authentication?.strategy === 'jwt' && payload === undefined && params.task_id) {
     return {
       type: EXECUTOR_SESSION_TOKEN_TYPE,
       purpose: EXECUTOR_SESSION_TOKEN_PURPOSE,
@@ -41,6 +41,16 @@ function scopedPayload(context: HookContext): ExecutorSessionTokenPayload | null
 
   if (payload?.type !== undefined) return null;
   return null;
+}
+
+/** Whether this authenticated transport request carries executor scope for one task. */
+export function isTaskScopedExecutorRequest(context: HookContext, taskId: string): boolean {
+  return scopedPayload(context)?.task_id === taskId;
+}
+
+/** Whether this request carries a validated executor-session scope. */
+export function hasExecutorRuntimeScope(context: HookContext): boolean {
+  return scopedPayload(context) !== null;
 }
 
 function expectClaim(claim: string | undefined, label: string): string {
@@ -170,6 +180,16 @@ export function scopeExecutorRuntimeAuth(requireAuth: AuthHook): AuthHook {
   return async (context: HookContext): Promise<HookContext> => {
     const authenticated = await requireAuth(context);
     return executorRuntimeScopeGuard()(authenticated);
+  };
+}
+
+/** Require this transport call to carry a task-scoped executor session token. */
+export function requireExecutorRuntimeToken() {
+  return async (context: HookContext): Promise<HookContext> => {
+    if (!scopedPayload(context)) {
+      throw new Forbidden('A task-scoped executor token is required for this request');
+    }
+    return context;
   };
 }
 
@@ -315,6 +335,13 @@ export function executorRuntimeScopeGuard() {
         throw new Forbidden('Executor token is not valid for this endpoint');
       }
       requireMatchingSessionRoute(context, scope);
+    } else if (path === 'mcp-servers/oauth-auth-headers') {
+      // This executor-only endpoint validates the submitted session token and
+      // limits returned headers to MCP servers in that session's effective
+      // scope. Let only its read-like create operation reach that validation.
+      if (context.method !== 'create') {
+        throw new Forbidden('Executor token is not valid for this endpoint');
+      }
     } else if (path === 'config/resolve-api-key') {
       if (context.method !== 'create') {
         throw new Forbidden('Executor token is not valid for this endpoint');

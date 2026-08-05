@@ -1,6 +1,3 @@
-import fs from 'node:fs';
-import { readFile, realpath, stat } from 'node:fs/promises';
-import path from 'node:path';
 import {
   BranchRepository,
   GatewayChannelRepository,
@@ -23,11 +20,14 @@ import {
   type SlackWizardOptions,
 } from '@agor/core/gateway';
 import {
+  AGENTIC_TOOL_NAMES,
   type Branch,
   type BranchID,
   GATEWAY_REDACTED_SENTINEL,
   GATEWAY_SENSITIVE_CONFIG_FIELDS,
   type GatewayChannel,
+  type GatewayChannelCreateData,
+  type GatewayChannelPatchData,
   type GatewaySource,
   getGatewaySource,
   getRequiredSecretFields,
@@ -36,22 +36,24 @@ import {
   resolveSlackAgentTools,
   type ScheduleID,
   type Session,
+  type SessionID,
   type SlackAgentToolCapability,
   type UserID,
-  type UserRole,
   type UUID,
 } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { GatewayService } from '../../services/gateway.js';
 import { hasBranchPermission } from '../../utils/branch-authorization.js';
-import {
-  canonicalizeExistingPrefix,
-  isPathInsideRoot,
-  resolveBranchWorkspacePath,
-} from '../../utils/branch-workspace-path.js';
+import { resolveExecutorReadAsUser } from '../../utils/executor-read-impersonation.js';
 import { ingestInboundAttachments, isIngestableFile } from '../../utils/gateway-attachments.js';
-import { getUploadDirectory, MAX_UPLOAD_FILE_SIZE } from '../../utils/upload.js';
+import {
+  generateScopedServiceToken,
+  getDaemonUrl,
+  runExecutorCommand,
+} from '../../utils/spawn-executor.js';
+import { getUploadLimits } from '../../utils/upload.js';
+import { getUploadStagingStore } from '../../utils/upload-staging.js';
 import {
   mcpLimit,
   mcpOptionalId,
@@ -201,7 +203,7 @@ const envVarSchema = z.strictObject({
 const agenticConfigSchema = z
   .strictObject({
     agent: z
-      .enum(['claude-code', 'claude-code-cli', 'codex', 'gemini', 'opencode', 'copilot', 'cursor'])
+      .enum(AGENTIC_TOOL_NAMES)
       .describe('Agent used for sessions created from this gateway channel.'),
     permissionMode: z
       .enum([
@@ -243,9 +245,11 @@ const gatewayChannelCreateSchema = z
   .strictObject({
     name: mcpRequiredString('name', 'Human-readable channel name, e.g. "Engineering Slack".'),
     channelType: z
-      .enum(['slack', 'github', 'teams', 'discord', 'whatsapp', 'telegram'])
+      .enum(['slack', 'github', 'teams', 'shortcut', 'discord', 'whatsapp', 'telegram'])
       .default('slack')
-      .describe('Gateway platform type. Current active connectors are slack, github, and teams.'),
+      .describe(
+        'Gateway platform type. Current active connectors are slack, github, teams, and shortcut.'
+      ),
     targetBranchId: mcpRequiredId(
       'targetBranchId',
       'Branch',
@@ -279,6 +283,7 @@ const gatewayChannelCreateSchema = z
         app_token: 'config.app_token is required for Slack Socket Mode.',
         private_key: 'config.private_key is required for GitHub gateway channels.',
         app_password: 'config.app_password is required for Teams gateway channels.',
+        api_token: 'config.api_token is required for Shortcut gateway channels.',
       };
       for (const field of getRequiredSecretFields(value.channelType, config)) {
         if (!config[field]) {
@@ -665,7 +670,7 @@ const gatewayChannelUpdateSchema = z.strictObject({
   ),
   name: mcpOptionalNonEmptyString('name', 'New human-readable channel name.'),
   channelType: z
-    .enum(['slack', 'github', 'teams', 'discord', 'whatsapp', 'telegram'])
+    .enum(['slack', 'github', 'teams', 'shortcut', 'discord', 'whatsapp', 'telegram'])
     .optional()
     .describe('Gateway platform type. Changing this should include compatible config.'),
   targetBranchId: mcpOptionalId('targetBranchId', 'Branch', 'New target branch/worktree ID.'),
@@ -725,12 +730,14 @@ function redactGatewayChannel(channel: GatewayChannel): GatewayChannelSummary {
   };
 }
 
-function toServiceCreateData(args: z.infer<typeof gatewayChannelCreateSchema>) {
+function toServiceCreateData(
+  args: z.infer<typeof gatewayChannelCreateSchema>
+): GatewayChannelCreateData {
   return {
     name: args.name,
     channel_type: args.channelType,
-    target_branch_id: args.targetBranchId,
-    agor_user_id: args.agorUserId ?? '',
+    target_branch_id: args.targetBranchId as GatewayChannelCreateData['target_branch_id'],
+    agor_user_id: (args.agorUserId ?? '') as GatewayChannelCreateData['agor_user_id'],
     enabled: args.enabled ?? true,
     config: args.config,
     mcp_server_ids: args.mcpServerIds,
@@ -746,24 +753,30 @@ function toServiceCreateData(args: z.infer<typeof gatewayChannelCreateSchema>) {
   };
 }
 
-function toServiceUpdateData(args: z.infer<typeof gatewayChannelUpdateSchema>) {
-  const updates: Partial<GatewayChannel> = {};
+function toServiceUpdateData(
+  args: z.infer<typeof gatewayChannelUpdateSchema>
+): GatewayChannelPatchData {
+  const updates: GatewayChannelPatchData = {};
   if (args.name !== undefined) updates.name = args.name;
   if (args.channelType !== undefined) updates.channel_type = args.channelType;
-  if (args.targetBranchId !== undefined) updates.target_branch_id = args.targetBranchId as never;
-  if (args.agorUserId !== undefined) updates.agor_user_id = args.agorUserId as never;
+  if (args.targetBranchId !== undefined) {
+    updates.target_branch_id = args.targetBranchId as GatewayChannelPatchData['target_branch_id'];
+  }
+  if (args.agorUserId !== undefined) {
+    updates.agor_user_id = args.agorUserId as GatewayChannelPatchData['agor_user_id'];
+  }
   if (args.enabled !== undefined) updates.enabled = args.enabled;
   if (args.config !== undefined) updates.config = args.config;
   if (args.mcpServerIds !== undefined) updates.mcp_server_ids = args.mcpServerIds;
   if (args.agenticConfig !== undefined) {
     updates.agentic_config = args.agenticConfig
-      ? ({
+      ? {
           ...args.agenticConfig,
           envVars: args.agenticConfig.envVars?.map((envVar) => ({
             ...envVar,
             forceOverride: envVar.forceOverride ?? false,
           })),
-        } as never)
+        }
       : null;
   }
   return updates;
@@ -801,7 +814,7 @@ const slackManifestGenerateSchema = z.strictObject({
     .boolean()
     .default(false)
     .describe(
-      'Ingest images and text files attached to inbound messages (adds the files:read scope). The gateway downloads them server-side and hands the stored paths to the session agent.'
+      'Ingest images and text files attached to inbound messages (adds the files:read scope). The gateway stages them server-side and hands opaque, expiring handles to the session agent.'
     ),
   threadHistory: z
     .boolean()
@@ -912,7 +925,7 @@ interface SlackFileUploadConnector {
   uploadFile(req: {
     channel: string;
     threadTs?: string;
-    file: Buffer;
+    file: NodeJS.ReadableStream | Buffer;
     filename: string;
     comment?: string;
   }): Promise<{ id: string; permalink: string | null; name: string }>;
@@ -1019,10 +1032,21 @@ const slackFileUploadSchema = z.strictObject({
     'threadTs',
     'Optional Slack thread timestamp to upload the file as a reply into.'
   ),
-  path: mcpRequiredString(
-    'path',
-    "File to upload: either an absolute path inside the daemon upload directory (e.g. a path you were given in an 'Attached files:' prompt), or a path relative to the calling session's branch workspace root. Arbitrary host filesystem paths are rejected."
-  ),
+  source: z.discriminatedUnion('kind', [
+    z.strictObject({
+      kind: z.literal('upload'),
+      uploadRef: z
+        .string()
+        .regex(/^upl_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/),
+    }),
+    z.strictObject({
+      kind: z.literal('branch'),
+      branchPath: mcpRequiredString(
+        'source.branchPath',
+        'Path relative to the calling session branch workspace.'
+      ),
+    }),
+  ]),
   filename: mcpOptionalNonEmptyString(
     'filename',
     'Filename to show in Slack. Defaults to the source filename.'
@@ -1168,51 +1192,76 @@ async function resolveGatewaySlackToolTarget(
 
 /**
  * Resolve `agor_gateway_slack_file_upload`'s `path` argument to an absolute
- * file. Accepts either an absolute path inside the daemon upload directory
- * (where inbound-ingested and composer-uploaded attachments live) or a path
- * relative to the target branch's workspace root, resolved the same way
- * `resolveBranchWorkspacePath` bounds every other branch-workspace file tool.
- * Rejects everything else so this tool can never read arbitrary host files.
+ * daemon-owned file. Branch-relative files are handled by the executor.
  */
-async function resolveGatewayUploadFilePath(
-  ctx: McpContext,
-  branchId: BranchID,
-  rawPath: string
-): Promise<{ absolutePath: string; sourceName: string }> {
-  const trimmed = rawPath.trim();
-  if (!trimmed) throw new Error('path is required');
-
-  if (path.isAbsolute(trimmed)) {
-    const uploadDir = getUploadDirectory();
-    const uploadRoot = await realpath(uploadDir).catch(() => path.resolve(uploadDir));
-    const canonical = await canonicalizeExistingPrefix(trimmed);
-    if (!isPathInsideRoot(uploadRoot, canonical)) {
-      throw new Error(
-        'path escapes the daemon upload directory; pass an absolute path inside it or a path relative to the branch workspace.'
-      );
-    }
-    if (!fs.existsSync(canonical)) {
-      throw new Error(`File not found: ${trimmed}`);
-    }
-    return { absolutePath: canonical, sourceName: path.basename(canonical) };
-  }
-
-  const branchRepo = bindMcpRepositoryToTenantUnitOfWork(ctx, (db) => new BranchRepository(db));
-  const workspace = await resolveBranchWorkspacePath({
-    branchRepo,
-    branchId,
-    subpath: trimmed,
-    userId: ctx.userId,
-    userRole: ctx.authenticatedUser?.role as UserRole | undefined,
-    requiredPermission: 'session',
-  });
-  if (!fs.existsSync(workspace.absolute)) {
-    throw new Error(`File not found in branch workspace: ${workspace.relative}`);
-  }
-  return { absolutePath: workspace.canonical, sourceName: path.basename(workspace.canonical) };
-}
-
 export function registerGatewayChannelTools(server: McpServer, ctx: McpContext): void {
+  server.registerTool(
+    'agor_upload_materialize',
+    {
+      description:
+        'Materialize an opaque staged upload into the calling session executor-owned staging directory. Bytes stream directly to the executor; the result is a session-visible relative path without exposing daemon storage.',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+      inputSchema: z.strictObject({
+        uploadRef: z.string().regex(/^upl_[0-9a-f-]{36}$/),
+      }),
+    },
+    async (args) => {
+      const tenantId = ctx.baseServiceParams.tenant?.tenant_id;
+      const session = await loadCallerSession(ctx);
+      if (!tenantId || !session || !ctx.sessionId) {
+        throw new Error('Upload materialization requires tenant-bound session context');
+      }
+      const ref = args.uploadRef as import('@agor/core/types').UploadRef;
+      const store = getUploadStagingStore();
+      const metadata = await store.inspect({
+        tenantId,
+        sessionId: ctx.sessionId,
+        branchId: session.branch_id,
+        ref,
+      });
+      const result = await runExecutorCommand(
+        {
+          command: 'branch.upload.materialize',
+          sessionToken: generateScopedServiceToken(
+            ctx.app as unknown as { settings: { authentication?: { secret?: string } } },
+            {
+              executor_action: 'upload.materialize',
+              executor_user_id: ctx.authenticatedUser.user_id,
+              executor_branch_id: session.branch_id,
+              executor_session_id: ctx.sessionId,
+              executor_upload_ref: ref,
+            },
+            '10m'
+          ),
+          daemonUrl: getDaemonUrl(),
+          params: {
+            branchId: session.branch_id,
+            sessionId: ctx.sessionId,
+            uploadRef: ref,
+            filename: metadata.name,
+          },
+        },
+        {
+          logPrefix: `[Upload materialize ${ctx.sessionId}]`,
+          asUser: await runWithMcpTenantDatabaseScope(ctx, (db) =>
+            resolveExecutorReadAsUser(db, ctx.authenticatedUser.user_id)
+          ),
+        }
+      );
+      if (!result.success) {
+        throw new Error(
+          `Upload materialization failed: ${result.error?.message ?? 'unknown error'}`
+        );
+      }
+      return textResult({
+        upload_ref: ref,
+        name: metadata.name,
+        path: (result.data as { path?: string } | undefined)?.path,
+        expires_at: metadata.expiresAt,
+      });
+    }
+  );
+
   server.registerTool(
     'agor_gateway_channels_list',
     {
@@ -1225,7 +1274,7 @@ export function registerGatewayChannelTools(server: McpServer, ctx: McpContext):
           .optional()
           .describe('Include disabled channels (default: true).'),
         channelType: z
-          .enum(['slack', 'github', 'teams', 'discord', 'whatsapp', 'telegram'])
+          .enum(['slack', 'github', 'teams', 'shortcut', 'discord', 'whatsapp', 'telegram'])
           .optional()
           .describe('Optional platform filter.'),
         limit: mcpLimit(100),
@@ -1638,36 +1687,109 @@ export function registerGatewayChannelTools(server: McpServer, ctx: McpContext):
     'agor_gateway_slack_file_upload',
     {
       description:
-        "Upload a file or image to a Slack channel or thread through a gateway channel without exposing Slack tokens. Gated by the channel's agent_tools.file_upload capability (disabled by default — an admin enables it per channel, which also adds the files:write OAuth scope to the app manifest). path must be either an absolute path inside the daemon upload directory (e.g. a path from an 'Attached files:' prompt) or a path relative to the calling session's branch workspace root; arbitrary host filesystem paths are rejected. When called from a gateway-created session, gatewayChannelId and slackChannelId default to that session's own channel; calls are restricted to gateway channels whose target branch matches the calling session's branch. Callers without session context need admin role or 'all' branch permission.",
+        'Upload a file or image to Slack without exposing tokens. source is either an opaque upl_ staging handle or a branch-relative executor-owned file. Daemon absolute paths are not accepted.',
       annotations: { destructiveHint: false, idempotentHint: false },
       inputSchema: slackFileUploadSchema,
     },
     async (args) => {
       const target = await resolveGatewaySlackToolTarget(ctx, args, 'file_upload');
-      const { absolutePath, sourceName } = await resolveGatewayUploadFilePath(
-        ctx,
-        target.channel.target_branch_id,
-        args.path
-      );
-      const stats = await stat(absolutePath);
-      if (!stats.isFile()) {
-        throw new Error(`Not a file: ${args.path}`);
-      }
-      if (stats.size > MAX_UPLOAD_FILE_SIZE) {
-        throw new Error(
-          `File exceeds the ${MAX_UPLOAD_FILE_SIZE}-byte upload limit: ${args.path} (${stats.size} bytes)`
+      const branch = target.branch;
+      if (!branch) throw new Error('Gateway target branch is unavailable');
+      if (args.source.kind === 'branch') {
+        const result = await runExecutorCommand(
+          {
+            command: 'branch.gateway.slack-file-upload',
+            sessionToken: generateScopedServiceToken(
+              ctx.app as unknown as { settings: { authentication?: { secret?: string } } },
+              {
+                executor_action: 'gateway.slack-file-upload',
+                executor_user_id: ctx.authenticatedUser.user_id,
+                executor_branch_id: target.channel.target_branch_id,
+                executor_gateway_channel_id: target.channel.id,
+                executor_slack_channel_id: target.slackChannelId,
+              }
+            ),
+            daemonUrl: getDaemonUrl(),
+            params: {
+              branchId: target.channel.target_branch_id,
+              filePath: args.source.branchPath,
+              gatewayChannelId: target.channel.id,
+              channel: target.slackChannelId,
+              threadTs: args.threadTs,
+              filename: args.filename,
+              comment: args.comment,
+              maxBytes: getUploadLimits().maxFileBytes,
+            },
+          },
+          {
+            logPrefix: `[Gateway Slack upload ${target.channel.id}]`,
+            asUser: await runWithMcpTenantDatabaseScope(ctx, (db) =>
+              resolveExecutorReadAsUser(db, ctx.authenticatedUser.user_id)
+            ),
+          }
         );
+        if (!result.success) {
+          throw new Error(
+            `Slack file upload failed: ${result.error?.message ?? 'unknown executor error'}`
+          );
+        }
+        const uploaded =
+          result.data && typeof result.data === 'object'
+            ? (result.data as { uploaded?: unknown }).uploaded
+            : undefined;
+        return textResult({
+          uploaded: true,
+          gateway_channel: {
+            id: target.channel.id,
+            name: target.channel.name,
+            target_branch_id: target.channel.target_branch_id,
+          },
+          slack_channel_id: target.slackChannelId,
+          result: uploaded,
+        });
       }
-      const fileBuffer = await readFile(absolutePath);
+
+      const tenantId = ctx.baseServiceParams.tenant?.tenant_id;
+      if (!tenantId || !ctx.sessionId)
+        throw new Error('Staged uploads require tenant-bound session context');
+      const store = getUploadStagingStore();
+      const ref = args.source.uploadRef as import('@agor/core/types').UploadRef;
+      const metadata = await store.inspect({
+        tenantId,
+        sessionId: ctx.sessionId,
+        branchId: branch.branch_id,
+        ref,
+      });
+      const fileStream = await store.read({
+        tenantId,
+        sessionId: ctx.sessionId,
+        branchId: branch.branch_id,
+        ref,
+      });
       const connector = getConnector('slack', target.channel.config);
       assertSlackFileUploadConnector(connector);
       const uploaded = await connector.uploadFile({
         channel: target.slackChannelId,
         ...(args.threadTs ? { threadTs: args.threadTs } : {}),
-        file: fileBuffer,
-        filename: args.filename ?? sourceName,
+        file: fileStream,
+        filename: args.filename ?? metadata.name,
         ...(args.comment ? { comment: args.comment } : {}),
       });
+      try {
+        await store.consume({
+          tenantId,
+          sessionId: ctx.sessionId,
+          branchId: branch.branch_id,
+          ref,
+        });
+      } catch (error) {
+        // Slack already accepted the bytes. Do not turn cleanup failure into a
+        // retryable tool failure that could duplicate the outbound upload.
+        console.warn('[gateway] Slack upload succeeded but staged handle consumption failed', {
+          uploadRef: ref,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
       return textResult({
         uploaded: true,
         gateway_channel: {
@@ -1686,12 +1808,14 @@ export function registerGatewayChannelTools(server: McpServer, ctx: McpContext):
     'agor_gateway_slack_file_download',
     {
       description:
-        "Download a Slack file by fileId (from the files metadata in the Slack history tools) into the session upload directory, returning the stored path for the agent to Read. Gated by the channel's agent_tools.file_download capability; only files shared in a conversation permitted by the channel's allowed_channel_ids (DMs exempt), and only image/text-like types under the same limits as inbound attachment ingestion.",
+        "Download a Slack file by fileId (from the files metadata in the Slack history tools) into tenant/session-scoped staging, returning an opaque handle for agor_upload_materialize. Gated by the channel's agent_tools.file_download capability; only files shared in a conversation permitted by the channel's allowed_channel_ids (DMs exempt), and only image/text-like types under the same limits as inbound attachment ingestion.",
       annotations: { destructiveHint: false, idempotentHint: true },
       inputSchema: slackFileDownloadSchema,
     },
     async (args) => {
       const target = await resolveGatewaySlackChannelTarget(ctx, args, 'file_download');
+      const branch = target.branch;
+      if (!branch) throw new Error('Gateway target branch is unavailable');
       const connector = getConnector('slack', target.channel.config);
       assertSlackFileInfoConnector(connector);
       const { file, sourceConversationIds } = await connector.getFileInfo(args.fileId);
@@ -1711,18 +1835,27 @@ export function registerGatewayChannelTools(server: McpServer, ctx: McpContext):
           `Slack file "${file.name}" has type ${file.mimetype}, which the gateway does not download. Only image and text-like files (png/jpeg/gif/webp, plain text, markdown, CSV, JSON) are supported.`
         );
       }
-      if (file.size > MAX_UPLOAD_FILE_SIZE) {
+      const maxFileBytes = getUploadLimits().maxFileBytes;
+      if (file.size > maxFileBytes) {
         throw new Error(
-          `Slack file "${file.name}" is ${file.size} bytes, exceeding the ${MAX_UPLOAD_FILE_SIZE}-byte download limit.`
+          `Slack file "${file.name}" is ${file.size} bytes, exceeding the ${maxFileBytes}-byte download limit.`
         );
       }
       const botToken = target.channel.config?.bot_token;
       if (typeof botToken !== 'string' || !botToken) {
         throw new Error(`Gateway channel ${target.channel.id} has no bot token configured.`);
       }
-      const { paths } = await ingestInboundAttachments({ files: [file], botToken });
-      const storedPath = paths[0];
-      if (!storedPath) {
+      if (!ctx.sessionId) throw new Error('Slack downloads require session-bound staging');
+      const { uploads } = await ingestInboundAttachments({
+        files: [file],
+        botToken,
+        tenantId: ctx.baseServiceParams.tenant!.tenant_id,
+        sessionId: ctx.sessionId as SessionID,
+        branchId: branch.branch_id,
+        createdBy: ctx.authenticatedUser.user_id as UserID,
+      });
+      const staged = uploads[0];
+      if (!staged) {
         throw new Error(
           `Failed to download Slack file "${file.name}" (${args.fileId}); see daemon logs for details.`
         );
@@ -1739,7 +1872,8 @@ export function registerGatewayChannelTools(server: McpServer, ctx: McpContext):
           name: file.name,
           mimetype: file.mimetype,
           size: file.size,
-          path: storedPath,
+          upload_ref: staged.ref,
+          expires_at: staged.expiresAt,
         },
       });
     }

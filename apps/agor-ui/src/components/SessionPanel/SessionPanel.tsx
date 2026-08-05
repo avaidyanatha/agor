@@ -1,4 +1,5 @@
 import type {
+  AgenticToolName,
   AgorClient,
   Branch,
   CodexApprovalPolicy,
@@ -14,8 +15,10 @@ import type {
 import {
   AGENTIC_TOOL_CAPABILITIES,
   getDefaultPermissionMode,
+  isAgenticToolName,
   mapToCodexPermissionConfig,
   SessionStatus,
+  shortId,
   TaskStatus,
 } from '@agor-live/client';
 import {
@@ -23,13 +26,15 @@ import {
   CloseOutlined,
   CodeOutlined,
   DownOutlined,
+  EditOutlined,
   EllipsisOutlined,
   InboxOutlined,
+  RobotOutlined,
   SearchOutlined,
   SettingOutlined,
   UpOutlined,
 } from '@ant-design/icons';
-import type { MenuProps } from 'antd';
+import type { InputRef, MenuProps } from 'antd';
 import {
   Alert,
   App,
@@ -37,7 +42,9 @@ import {
   Button,
   Dropdown,
   Input,
+  Modal,
   Space,
+  Spin,
   Tooltip,
   Typography,
   theme,
@@ -60,6 +67,7 @@ import { getContextWindowGradient } from '../../utils/contextWindow';
 import { mcpServerNeedsAuth } from '../../utils/mcpAuth';
 import { useThemedMessage } from '../../utils/message';
 import { getSessionDisplayTitle, getSessionTitleStyles } from '../../utils/sessionTitle';
+import { AgentSelectionGrid } from '../AgentSelectionGrid/AgentSelectionGrid';
 import { AutocompleteTextarea } from '../AutocompleteTextarea';
 import { FileUpload } from '../FileUpload';
 import { ForkSpawnModal } from '../ForkSpawnModal/ForkSpawnModal';
@@ -288,6 +296,7 @@ export interface SessionPanelProps {
   sessionMcpServerIds?: string[];
   open: boolean;
   onClose: () => void;
+  uploadPolicy?: import('@agor/core/types').UploadIngressPolicy;
 }
 
 const SessionPanel: React.FC<SessionPanelProps> = ({
@@ -298,6 +307,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   sessionMcpServerIds = [],
   open,
   onClose,
+  uploadPolicy,
 }) => {
   const { token } = theme.useToken();
   const { modal } = App.useApp();
@@ -315,15 +325,79 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   const userAuthenticatedMcpServerIds = useAgorStore(selectUserAuthenticatedMcpServerIds);
 
   // Get actions from context
-  const { onSendPrompt, onFork, onBtwFork, onOpenSettings, onUpdateSession, onOpenTerminal } =
-    useAppActions();
+  const {
+    onSendPrompt,
+    onFork,
+    onBtwFork,
+    onOpenSettings,
+    onUpdateSession,
+    onOpenTerminal,
+    onChooseAgenticTool,
+    availableAgents,
+  } = useAppActions();
 
   const { archiveSession } = useSessionActions(client);
 
+  // Click-to-edit session title, inline in the header — see render below.
+  // Draft is seeded from the *explicit* title only (not the description
+  // fallback getSessionDisplayTitle shows when unset), so entering edit mode
+  // never accidentally "sets" a title from the first-prompt fallback text.
+  const [editingTitle, setEditingTitle] = React.useState(false);
+  const [titleHovered, setTitleHovered] = React.useState(false);
+  const [titleDraft, setTitleDraft] = React.useState('');
+  const titleInputRef = React.useRef<InputRef | null>(null);
+  const startEditingTitle = React.useCallback(() => {
+    setTitleDraft(session?.title ?? '');
+    setEditingTitle(true);
+  }, [session?.title]);
+  const saveTitle = React.useCallback(() => {
+    setEditingTitle(false);
+    if (!session) return;
+    const trimmed = titleDraft.trim();
+    if (trimmed !== (session.title ?? '')) {
+      onUpdateSession?.(session.session_id, { title: trimmed });
+    }
+  }, [session, titleDraft, onUpdateSession]);
+  React.useEffect(() => {
+    if (editingTitle) titleInputRef.current?.focus();
+  }, [editingTitle]);
+
+  // "Switch tool" — same underlying chooseAgenticTool action the quick-start
+  // empty-state tiles use, just with `replacingSessionId` set. Only offered
+  // on a session with zero tasks (never prompted yet): tool is a per-session
+  // SDK choice baked into every task, so there's no safe way to change it
+  // once a conversation exists — hide the affordance entirely rather than
+  // let it fail or silently drop history. (See `canSwitchTool` /
+  // `handleSwitchTool` below the early-return, once `session` is narrowed.)
+  const [switchToolOpen, setSwitchToolOpen] = React.useState(false);
+  // The tile the user just clicked, not a bare boolean — mirrors
+  // `PendingToolChoicePanel`'s `choosingTool` so the grid highlights the tile
+  // being switched *to* during the async request, not the session's current
+  // (old) tool.
+  const [switchingTool, setSwitchingTool] = React.useState<string | null>(null);
+
+  // App renders this panel without a session key, so a route/back-forward
+  // change swaps `session` in place instead of remounting. Reset the transient
+  // title-edit and switch-tool UI when the session id changes so a draft title
+  // or an open switch modal from the previous session can't bleed into (and
+  // then act on) the next one.
+  const titleStateSessionId = session?.session_id;
+  const prevTitleStateSessionId = React.useRef(titleStateSessionId);
+  React.useEffect(() => {
+    if (prevTitleStateSessionId.current !== titleStateSessionId) {
+      prevTitleStateSessionId.current = titleStateSessionId;
+      setEditingTitle(false);
+      setTitleDraft('');
+      setSwitchToolOpen(false);
+      setSwitchingTool(null);
+    }
+  }, [titleStateSessionId]);
+
   // Tool capabilities — drives which buttons are shown
-  const toolCaps = session?.agentic_tool
-    ? AGENTIC_TOOL_CAPABILITIES[session.agentic_tool]
-    : undefined;
+  const activeAgenticTool =
+    session && isAgenticToolName(session.agentic_tool) ? session.agentic_tool : undefined;
+  const hasActiveAgenticTool = Boolean(activeAgenticTool);
+  const toolCaps = activeAgenticTool ? AGENTIC_TOOL_CAPABILITIES[activeAgenticTool] : undefined;
 
   // Compute which session MCP servers need authentication
   const unauthedMcpServers = React.useMemo(() => {
@@ -376,7 +450,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
 
   const initialPermissionMode: PermissionMode =
     session?.permission_config?.mode ??
-    (session?.agentic_tool
+    (session?.agentic_tool && isAgenticToolName(session.agentic_tool)
       ? getDefaultPermissionMode(session.agentic_tool)
       : getDefaultPermissionMode('claude-code'));
   const initialCodexDefaults = mapToCodexPermissionConfig(initialPermissionMode);
@@ -387,20 +461,9 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   const [codexApprovalPolicy, setCodexApprovalPolicy] = React.useState<CodexApprovalPolicy>(
     session?.permission_config?.codex?.approvalPolicy ?? initialCodexDefaults.approvalPolicy
   );
-  const [effortLevel, setEffortLevel] = React.useState<EffortLevel>(
-    session?.model_config?.effort || 'high'
+  const [effortLevel, setEffortLevel] = React.useState<EffortLevel | undefined>(
+    session?.model_config?.effort ?? toolCaps?.defaultReasoningEffort
   );
-  /**
-   * Claude Code CLI view toggle: 'terminal' shows the embedded `claude`
-   * REPL full-height (with the Agor textarea hidden, since `claude` has
-   * its own input prompt); 'conversation' shows Agor's standard message
-   * feed rebuilt from the JSONL by the daemon watcher.
-   *
-   * Only meaningful when `session.agentic_tool === 'claude-code-cli'`.
-   * Defaults to 'terminal' so users see the live REPL on first open.
-   * Persisting this per-session as a UI preference is a v1.5 follow-up.
-   */
-  const [cliViewMode, setCliViewMode] = React.useState<'terminal' | 'conversation'>('terminal');
   const [scrollToBottom, setScrollToBottom] = React.useState<(() => void) | null>(null);
   const [scrollToTop, setScrollToTop] = React.useState<(() => void) | null>(null);
   const [queuedTasks, setQueuedTasks] = React.useState<Task[]>([]);
@@ -465,6 +528,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   } = useComposerAttachments({
     sessionId: session?.session_id ?? null,
     showError,
+    uploadPolicy,
   });
   const composerSendInFlightRef = React.useRef(false);
 
@@ -619,6 +683,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     for (let index = tasks.length - 1; index >= 0; index -= 1) {
       const candidate = tasks[index];
       if (
+        candidate.status === TaskStatus.DISPATCHING ||
         candidate.status === TaskStatus.RUNNING ||
         candidate.status === TaskStatus.STOPPING ||
         candidate.status === TaskStatus.AWAITING_PERMISSION ||
@@ -635,7 +700,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   React.useEffect(() => {
     if (session?.permission_config?.mode) {
       setPermissionMode(session.permission_config.mode);
-    } else if (session?.agentic_tool) {
+    } else if (session?.agentic_tool && isAgenticToolName(session.agentic_tool)) {
       setPermissionMode(getDefaultPermissionMode(session.agentic_tool));
     }
 
@@ -645,10 +710,10 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     }
   }, [session?.permission_config?.mode, session?.permission_config?.codex, session?.agentic_tool]);
 
-  // Update effort level when session changes (default to 'high' for sessions without effort config)
+  // Keep explicit overrides distinct from runtime-owned defaults (for example Codex config.toml).
   React.useEffect(() => {
-    setEffortLevel(session?.model_config?.effort || 'high');
-  }, [session?.model_config?.effort]);
+    setEffortLevel(session?.model_config?.effort ?? toolCaps?.defaultReasoningEffort);
+  }, [session?.model_config?.effort, toolCaps?.defaultReasoningEffort]);
 
   React.useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -698,7 +763,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     onSpawnOpen: () => void;
     onAttachFiles: () => void;
     onUploadOpen: () => void;
-    onEffortChange: (v: EffortLevel) => void;
+    onEffortChange: (v: EffortLevel | undefined) => void;
     onPermissionModeChange: (v: PermissionMode) => void;
     onCodexPermissionChange: (sandbox: CodexSandboxMode, approval: CodexApprovalPolicy) => void;
   } | null>(null);
@@ -713,7 +778,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
       onSpawnOpen: () => footerHandlersRef.current?.onSpawnOpen(),
       onAttachFiles: () => footerHandlersRef.current?.onAttachFiles(),
       onUploadOpen: () => footerHandlersRef.current?.onUploadOpen(),
-      onEffortChange: (v: EffortLevel) => footerHandlersRef.current?.onEffortChange(v),
+      onEffortChange: (v: EffortLevel | undefined) => footerHandlersRef.current?.onEffortChange(v),
       onPermissionModeChange: (v: PermissionMode) =>
         footerHandlersRef.current?.onPermissionModeChange(v),
       onCodexPermissionChange: (sandbox: CodexSandboxMode, approval: CodexApprovalPolicy) =>
@@ -843,6 +908,9 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   if (!session) {
     return null;
   }
+  const activeSession = isAgenticToolName(session.agentic_tool)
+    ? (session as Session & { agentic_tool: AgenticToolName })
+    : null;
 
   const handleArchive = () => {
     if (!client || connectionDisabled) {
@@ -868,6 +936,18 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   };
 
   const hasBranchActions = !!branch;
+  const canSwitchTool =
+    hasActiveAgenticTool && !!branch && !!onChooseAgenticTool && (session.tasks?.length ?? 0) === 0;
+  const handleSwitchTool = async (tool: string) => {
+    if (!branch || !onChooseAgenticTool || switchingTool) return;
+    setSwitchingTool(tool);
+    try {
+      await onChooseAgenticTool(branch.branch_id, tool as AgenticToolName, session.session_id);
+      setSwitchToolOpen(false);
+    } finally {
+      setSwitchingTool(null);
+    }
+  };
   const moreMenuItems: MenuProps['items'] = [
     ...(branch
       ? [
@@ -895,8 +975,18 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
           {
             key: 'settings',
             icon: <SettingOutlined />,
-            label: 'Session Settings',
+            label: 'Session settings',
             onClick: () => onOpenSettings(session.session_id),
+          },
+        ]
+      : []),
+    ...(canSwitchTool
+      ? [
+          {
+            key: 'switch-tool',
+            icon: <RobotOutlined />,
+            label: 'Switch tool…',
+            onClick: () => setSwitchToolOpen(true),
           },
         ]
       : []),
@@ -950,7 +1040,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
         attachmentsAtSendStart,
         sendStartSessionId
       );
-      const attachmentPaths = uploadedFiles.map((file) => file.path);
+      const promptAttachments = uploadedFiles;
       const composerStillOwnsSend =
         composerSessionIdentityRef.current.sessionId === sendStartSessionId &&
         composerSessionIdentityRef.current.generation === sendStartComposerIdentity.generation;
@@ -967,7 +1057,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             sendStartValue: value,
           })
         : value;
-      const promptToSend = buildPromptWithAttachments(latestValue, attachmentPaths);
+      const promptToSend = buildPromptWithAttachments(latestValue, promptAttachments);
       if (!promptToSend.trim()) return;
 
       // Single entry point: /prompt. The daemon decides run-vs-queue based on
@@ -1002,6 +1092,37 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
 
   const handleStop = async () => {
     if (!session || !client || stopRequestInFlight) return;
+
+    const unverifiedTask = [...tasks]
+      .reverse()
+      .find(
+        (task) =>
+          task.status === TaskStatus.STOPPING && task.sdk_failure?.termination === 'unverified'
+      );
+    if (unverifiedTask) {
+      const expected = shortId(unverifiedTask.task_id);
+      const confirmation = window.prompt(
+        `Agor could not verify that this executor stopped. It may still be running and writing to the branch. Type ${expected} to force-fail the Task anyway.`
+      );
+      if (confirmation === null) return;
+      if (confirmation !== expected) {
+        showError(`Type ${expected} to confirm force-fail.`);
+        return;
+      }
+      setStopRequestInFlight(true);
+      try {
+        await client.service(`sessions/${session.session_id}/stop`).create({
+          force_unverified: true,
+          confirmation,
+        });
+      } catch (error) {
+        console.error('Failed to force-fail execution:', error);
+        showError('Failed to force-fail execution. You can try again.');
+      } finally {
+        setStopRequestInFlight(false);
+      }
+      return;
+    }
 
     // Show feedback immediately if this is a retry
     if (isStopping) {
@@ -1151,18 +1272,17 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     }
   };
 
-  const handleEffortChange = (newEffort: EffortLevel) => {
+  const handleEffortChange = (newEffort: EffortLevel | undefined) => {
     setEffortLevel(newEffort);
 
-    if (session && onUpdateSession) {
-      if (session.model_config) {
-        onUpdateSession(session.session_id, {
-          model_config: {
-            ...session.model_config,
-            effort: newEffort,
-          },
-        });
-      }
+    if (session?.model_config && onUpdateSession) {
+      const nextModelConfig = {
+        ...session.model_config,
+        updated_at: new Date().toISOString(),
+      };
+      if (newEffort) nextModelConfig.effort = newEffort;
+      else delete nextModelConfig.effort;
+      onUpdateSession(session.session_id, { model_config: nextModelConfig });
     }
   };
 
@@ -1220,9 +1340,9 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     onCodexPermissionChange: handleCodexPermissionChange,
   };
 
-  const sessionFooter = (
+  const sessionFooter = activeSession ? (
     <SessionFooter
-      session={session}
+      session={activeSession}
       footerTimerTask={footerTimerTask}
       tokenBreakdown={tokenBreakdown}
       latestContextWindow={latestContextWindow}
@@ -1261,7 +1381,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
       onCodexPermissionChange={stableFooterHandlers.onCodexPermissionChange}
       promptInputSlot={promptInputSlot}
     />
-  );
+  ) : null;
 
   return (
     <div
@@ -1290,9 +1410,66 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
               <ToolIcon tool={session.agentic_tool} size={40} />
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <Typography.Text strong style={{ fontSize: 18, ...getSessionTitleStyles(2) }}>
-                {getSessionDisplayTitle(session, { includeAgentFallback: true })}
-              </Typography.Text>
+              {editingTitle ? (
+                <Input
+                  ref={titleInputRef}
+                  value={titleDraft}
+                  onChange={(e) => setTitleDraft(e.target.value)}
+                  onBlur={saveTitle}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      saveTitle();
+                    } else if (e.key === 'Escape') {
+                      e.preventDefault();
+                      setEditingTitle(false);
+                    }
+                  }}
+                  placeholder="Untitled session"
+                  variant="borderless"
+                  style={{ fontSize: 18, fontWeight: 600, padding: 0 }}
+                />
+              ) : (
+                <Tooltip title="Click to rename">
+                  <button
+                    type="button"
+                    onClick={startEditingTitle}
+                    onMouseEnter={() => setTitleHovered(true)}
+                    onMouseLeave={() => setTitleHovered(false)}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      maxWidth: '100%',
+                      cursor: 'text',
+                      borderRadius: token.borderRadiusSM,
+                      padding: '2px 6px',
+                      margin: '-2px -6px',
+                      background: titleHovered ? token.colorFillTertiary : 'transparent',
+                      transition: 'background 0.15s',
+                      border: 'none',
+                      font: 'inherit',
+                      color: 'inherit',
+                      textAlign: 'left',
+                    }}
+                  >
+                    <Typography.Text strong style={{ fontSize: 18, ...getSessionTitleStyles(2) }}>
+                      {session.title || session.description
+                        ? getSessionDisplayTitle(session, { includeAgentFallback: false })
+                        : 'Untitled session'}
+                    </Typography.Text>
+                    <EditOutlined
+                      style={{
+                        fontSize: 12,
+                        color: token.colorTextTertiary,
+                        opacity: titleHovered ? 1 : 0,
+                        transition: 'opacity 0.15s',
+                        flexShrink: 0,
+                      }}
+                    />
+                  </button>
+                </Tooltip>
+              )}
               <Badge status={getStatusColor()} text={session.status.toUpperCase()} />
               {session.created_by && (
                 <div style={{ marginTop: token.sizeUnit }}>
@@ -1461,6 +1638,15 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             overflow: 'hidden',
           }}
         >
+          {!hasActiveAgenticTool && (
+            <Alert
+              type="warning"
+              showIcon
+              message="Historical session — runtime removed"
+              description="This session used the removed experimental Claude Code CLI integration. Its stored conversation remains readable, but it cannot be prompted, resumed, forked, spawned from, or restarted."
+              style={{ marginBottom: token.marginSM }}
+            />
+          )}
           <SessionPanelContent
             client={client}
             session={session}
@@ -1478,20 +1664,12 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             onSpawnModalConfirm={handleSpawnModalConfirm}
             inputValueRef={inputValueRef}
             isOpen={open}
-            cliViewMode={cliViewMode}
-            setCliViewMode={setCliViewMode}
             forceExpandAll={searchOpen && query.trim().length > 0}
           />
         </div>
 
-        {/* Footer — rendered outside SessionPanelContent so that
-            keystroke-driven re-renders don't propagate to ConversationView.
-            Hidden for CLI sessions in 'terminal' view because the embedded
-            `claude` REPL has its own input prompt; the Agor textarea is
-            redundant (and would inject via PTY anyway, racy with whatever
-            the user is typing into the REPL directly). */}
-        {!(session.agentic_tool === 'claude-code-cli' && cliViewMode === 'terminal') &&
-          sessionFooter}
+        {/* Footer is unavailable for historical sessions whose runtime was removed. */}
+        {sessionFooter}
 
         {/* Advanced upload modal preserves the existing file upload flow for
             non-image files and notify-agent options. */}
@@ -1523,6 +1701,44 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
           client={client}
           userById={userById}
         />
+
+        {/* Switch tool — same tile picker as the quick-start empty state,
+            just replacing this (never-prompted) session instead of creating
+            the first one. Only reachable via moreMenuItems when canSwitchTool. */}
+        <Modal
+          title="Switch tool"
+          open={switchToolOpen}
+          onCancel={() => setSwitchToolOpen(false)}
+          footer={null}
+        >
+          <Typography.Paragraph type="secondary" style={{ fontSize: 13 }}>
+            Choose a different tool for this session. Since nothing has been sent yet, this replaces
+            the session in place.
+          </Typography.Paragraph>
+          <div style={{ position: 'relative' }}>
+            <AgentSelectionGrid
+              agents={availableAgents ?? []}
+              selectedAgentId={switchingTool}
+              onSelect={handleSwitchTool}
+              columns={2}
+            />
+            {switchingTool && (
+              <div
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background: token.colorBgElevated,
+                  opacity: 0.7,
+                }}
+              >
+                <Spin size="small" />
+              </div>
+            )}
+          </div>
+        </Modal>
       </div>
     </div>
   );

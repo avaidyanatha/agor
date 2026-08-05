@@ -5,6 +5,7 @@
  * Messages are stored in a normalized table and referenced by tasks via message_range.
  */
 
+import type { PersistedAgenticToolName } from './agentic-tool';
 import type { MessageID, SessionID, TaskID } from './id';
 import type { WidgetMessageMetadata } from './widget';
 
@@ -18,14 +19,18 @@ export enum MessageRole {
 }
 
 /**
- * Message source - where the message originated
- * - 'gateway': Message came from external platform (Slack, Discord, etc.)
+ * Message source accepted by current prompt/runtime paths.
+ * - 'gateway': Message came from an external platform (Slack, Discord, etc.)
  * - 'agor': Message originated from Agor UI
- * - 'cli-repl': Message originated from a Claude Code CLI REPL turn that
- *   the user typed directly into the embedded xterm (not via Agor's
- *   textarea / /prompt route). Written by the JSONL watcher.
  */
-export type MessageSource = 'gateway' | 'agor' | 'cli-repl';
+export type MessageSource = 'gateway' | 'agor';
+
+/**
+ * Read-only provenance left on messages written by removed integrations.
+ * Runtime request types intentionally exclude these values.
+ */
+export type LegacyMessageSource = 'cli-repl';
+export type PersistedMessageSource = MessageSource | LegacyMessageSource;
 
 /**
  * Message type
@@ -255,7 +260,7 @@ export interface Message {
      * - 'agor': Message originated from Agor UI
      * - undefined: Legacy message or source not tracked
      */
-    source?: MessageSource;
+    source?: PersistedMessageSource;
 
     /**
      * Widget request state. Only populated on `type === 'widget_request'`
@@ -277,6 +282,27 @@ export interface Message {
      * prompt back to the originating widget for audit / debugging.
      */
     widget_id?: MessageID;
+
+    /** Generic structural marker set by the executor on the message it emits
+     * for any task failure (i.e. the SDK call threw). Lets downstream consumers
+     * identify a failure message without type/role guessing. Note the
+     * credential-classification hook itself keys off the more specific
+     * `is_missing_credential_failure` / `is_zero_turn_result` flags, not this one. */
+    is_task_failure?: boolean;
+
+    /** Set only when the executor's scoped credential preflight fails. */
+    is_missing_credential_failure?: boolean;
+
+    /** Marks the synthesized message from a zero-turn success (no real model call). */
+    is_zero_turn_result?: boolean;
+
+    /**
+     * Set server-side when a task failure resolves to "no credential for this
+     * session's provider". Drives the Connect-AI empty state instead of the
+     * raw error; `tool` names the provider that needs a credential.
+     */
+    error_kind?: 'missing_credential';
+    tool?: PersistedAgenticToolName;
 
     /** Additional agent-specific fields */
     [key: string]: unknown;

@@ -484,6 +484,27 @@
       "when": 1784000200000,
       "tag": "0070_drop_links",
       "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "6",
+      "when": 1784300000000,
+      "tag": "0071_task_dispatching",
+      "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "6",
+      "when": 1785200000000,
+      "tag": "0072_drop_serialized_sessions",
+      "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "6",
+      "when": 1785452400000,
+      "tag": "0073_uploads",
+      "breakpoints": true
     }
   ]
 }

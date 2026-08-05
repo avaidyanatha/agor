@@ -2,8 +2,13 @@ import type { BranchID, SessionID, TaskID } from '@agor/core/types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock minimal dependencies
-vi.mock('@agor/core', () => ({
+vi.mock('node:child_process', () => ({
+  execSync: vi.fn().mockReturnValue('/usr/bin/claude\n'),
+}));
+vi.mock('@agor/core/lib/validation', () => ({
   validateDirectory: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock('@agor/core/db', () => ({
   // shortId is used in log lines inside query-builder; passthrough mock.
   shortId: vi.fn((id: string) => id),
 }));
@@ -94,7 +99,7 @@ describe('setupQuery - Local Settings Support', () => {
   });
 
   // Pin the literal disallow list so a stray edit to the constant
-  // (e.g. dropping `ExitBranch`) trips this test, not just the plumbing one.
+  // (e.g. dropping `ExitWorktree`) trips this test, not just the plumbing one.
   // See `constants.ts` for why each name is on the list — #1177 covers
   // AskUserQuestion; the rest were operator-approved at the same time.
   // `ScheduleWakeup` added in #1253 (Agor schedules supersede /loop).
@@ -102,8 +107,8 @@ describe('setupQuery - Local Settings Support', () => {
     expect(CLAUDE_CODE_DISALLOWED_TOOLS).toEqual([
       'AskUserQuestion',
       'ExitPlanMode',
-      'EnterBranch',
-      'ExitBranch',
+      'EnterWorktree',
+      'ExitWorktree',
       'ScheduleWakeup',
     ]);
   });

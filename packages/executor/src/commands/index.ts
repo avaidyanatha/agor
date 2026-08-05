@@ -8,25 +8,40 @@
  */
 
 import type { ExecutorPayload, ExecutorResult, PromptPayload } from '../payload-types.js';
+import {
+  handleBranchArtifactLand,
+  handleBranchArtifactPublish,
+  handleBranchArtifactValidate,
+} from './artifacts.js';
+import { handleCodexAuthFile } from './codex-auth-file.js';
 import { handleEnvironmentLifecycle, handleEnvironmentLogs } from './environment.js';
+import {
+  handleBranchFilesBrowse,
+  handleBranchFilesRead,
+  handleBranchFilesystemStatus,
+} from './files.js';
+import { handleBranchSlackFileUpload } from './gateway.js';
 import {
   handleBranchAgorYmlExport,
   handleBranchAgorYmlImport,
   handleBranchFilesList,
-  handleBranchInspect,
   handleGitBranchAdd,
   handleGitBranchClean,
   handleGitBranchRemove,
   handleGitClone,
+  handleGitManagedCredentialsReconcile,
   handleGitRepoDelete,
+  handleGitRepoInspect,
   handleGitRepoRealignOrigin,
 } from './git.js';
+import { handleBranchKnowledgeRead, handleBranchKnowledgeWrite } from './knowledge.js';
 import {
   handleUnixSyncBoard,
   handleUnixSyncBranch,
   handleUnixSyncRepo,
   handleUnixSyncUser,
 } from './unix.js';
+import { handleBranchUploadMaterialize } from './upload.js';
 import { handleZellijAttach, handleZellijTab } from './zellij.js';
 
 export interface CommandOptions {
@@ -162,16 +177,28 @@ registerCommand('git.branch.add', handleGitBranchAdd);
 registerCommand('git.branch.remove', handleGitBranchRemove);
 registerCommand('git.branch.clean', handleGitBranchClean);
 registerCommand('branch.files.list', handleBranchFilesList);
-registerCommand('branch.inspect', handleBranchInspect);
+registerCommand('branch.files.browse', handleBranchFilesBrowse);
+registerCommand('branch.files.read', handleBranchFilesRead);
+registerCommand('branch.filesystem.status', handleBranchFilesystemStatus);
+registerCommand('branch.artifact.publish', handleBranchArtifactPublish);
+registerCommand('branch.artifact.land', handleBranchArtifactLand);
+registerCommand('branch.artifact.validate', handleBranchArtifactValidate);
+registerCommand('branch.knowledge.write', handleBranchKnowledgeWrite);
+registerCommand('branch.knowledge.read', handleBranchKnowledgeRead);
+registerCommand('branch.gateway.slack-file-upload', handleBranchSlackFileUpload);
+registerCommand('branch.upload.materialize', handleBranchUploadMaterialize);
 registerCommand('branch.agor-yml.import', handleBranchAgorYmlImport);
 registerCommand('branch.agor-yml.export', handleBranchAgorYmlExport);
 registerCommand('environment.lifecycle', handleEnvironmentLifecycle);
 registerCommand('environment.logs', handleEnvironmentLogs);
 registerCommand('git.repo.realign-origin', handleGitRepoRealignOrigin);
 registerCommand('git.repo.delete', handleGitRepoDelete);
+registerCommand('git.repo.inspect', handleGitRepoInspect);
+registerCommand('git.managed-credentials.reconcile', handleGitManagedCredentialsReconcile);
 registerCommand('unix.sync-repo', handleUnixSyncRepo);
 registerCommand('unix.sync-branch', handleUnixSyncBranch);
 registerCommand('unix.sync-board', handleUnixSyncBoard);
 registerCommand('unix.sync-user', handleUnixSyncUser);
 registerCommand('zellij.attach', handleZellijAttach);
 registerCommand('zellij.tab', handleZellijTab);
+registerCommand('codex.auth-file', handleCodexAuthFile);

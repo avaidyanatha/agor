@@ -19,6 +19,7 @@ import type {
   SessionRepository,
   UsersRepository,
 } from '../../db/feathers-repositories.js';
+import { truncateContentIfNeeded } from '../../services/tool-result-truncator.js';
 import type { NormalizedSdkResponse, RawSdkResponse } from '../../types/sdk-response.js';
 import type { TokenUsage } from '../../types/token-usage.js';
 import {
@@ -243,7 +244,8 @@ export class CodexTool implements ITool {
         prompt,
         taskId,
         permissionMode,
-        abortController
+        abortController,
+        streamingCallbacks?.onPulse
       )) {
         // Detect if execution was stopped early
         if (event.type === 'stopped') {
@@ -431,10 +433,16 @@ export class CodexTool implements ITool {
           clearToolInvocationState(event.toolUse.id, snapshotContext);
           pendingSnapshotToolIds.delete(event.toolUse.id);
 
+          // Truncate oversized tool results before persisting
+          const toolUseRefs = [
+            { id: event.toolUse.id, name: event.toolUse.name, input: event.toolUse.input },
+          ];
+          const { blocks: safeToolContent } = truncateContentIfNeeded(toolContent, toolUseRefs);
+
           const existingToolMessageId = pendingToolMessageIds.get(event.toolUse.id);
           if (existingToolMessageId) {
             await this.messagesService?.patch(existingToolMessageId, {
-              content: toolContent as Message['content'],
+              content: safeToolContent as Message['content'],
               content_preview:
                 typeof toolResultContent === 'string' ? toolResultContent.substring(0, 200) : '',
             });
@@ -445,7 +453,7 @@ export class CodexTool implements ITool {
             await this.createAssistantMessage(
               sessionId,
               toolMessageId,
-              toolContent as Array<{
+              safeToolContent as Array<{
                 type: string;
                 text?: string;
                 id?: string;

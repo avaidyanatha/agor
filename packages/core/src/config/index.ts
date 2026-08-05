@@ -5,7 +5,6 @@
  */
 
 export * from './agentic-tool-preset-resolver';
-export * from './agor-yml';
 export * from './config-manager';
 export * from './constants';
 export * from './env-blocklist';
@@ -16,11 +15,10 @@ export * from './env-vars';
 export * from './executor-heartbeat';
 export * from './key-resolver';
 export * from './multitenancy';
-export type { ProxyMethod, ResolvedProxy } from './proxies-resolver';
-export { resolveProxies } from './proxies-resolver';
 export * from './repo-list';
 export * from './repo-reference';
 export * from './resolved-config-slice';
+export * from './schedule-agentic-tool-config';
 export type {
   AgorGitConfigParametersSettings,
   ResolvedCors,
@@ -38,6 +36,7 @@ export {
   SANDPACK_CSP_FRAME_SRC,
   SANDPACK_CSP_WORKER_SRC,
 } from './security-resolver';
+export * from './storage-layout';
 export * from './tenant-agentic-tool-resolver';
 export * from './types';
 export * from './variant-resolver';

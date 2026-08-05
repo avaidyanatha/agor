@@ -3,6 +3,8 @@ title: Containerized Execution
 description: Running Agor executors in Kubernetes, Docker, or other containerized environments with shared storage
 ---
 
+import { ExecutorDiagram } from '../../components/ExecutorDiagram';
+
 # Containerized Execution
 
 This guide covers running Agor's executor component in containerized environments like Kubernetes, enabling scalable and isolated execution of AI coding agents.
@@ -18,37 +20,15 @@ Agor's architecture separates the **daemon** (orchestration layer) from the **ex
 
 ### The Executor Model
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Daemon (Orchestration Layer)                               │
-│  - REST/WebSocket API                                       │
-│  - Database (sessions, tasks, branches)                    │
-│  - User authentication                                      │
-│  - Never touches git data directly                          │
-│                                                             │
-│  Spawns executor via:                                       │
-│  - Local: spawn('agor-executor', ['--stdin'])              │
-│  - Remote: template → kubectl run ... | agor-executor      │
-└─────────────────────────────────────────────────────────────┘
-                          │
-                          │ JSON payload via stdin
-                          ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Executor (Isolation Boundary)                              │
-│  - Receives typed JSON payload                              │
-│  - Connects back to daemon via WebSocket                    │
-│  - Runs agent SDKs (Claude, Gemini, Codex)                 │
-│  - Manages git operations (clone, branch)                 │
-│  - Handles terminal sessions (Zellij)                       │
-│  - Short-lived: exits when command completes                │
-└─────────────────────────────────────────────────────────────┘
-```
+<ExecutorDiagram />
+
+The daemon owns orchestration and delegates all git **mutations** to the executor — it still runs read-only git probes (remote URL, default branch) and credential scrubbing itself. Each executor process handles a single command and exits, except terminal (Zellij) executors, which stay alive until closed.
 
 ### What the Executor Does
 
 | Command               | Purpose                                        |
 | --------------------- | ---------------------------------------------- |
-| `prompt`              | Execute agent SDK (Claude Code, Gemini, Codex) |
+| `prompt`              | Run an agent harness (Claude Code, Codex, Gemini, OpenCode, Copilot, Cursor) |
 | `git.clone`           | Clone repository with Unix group setup         |
 | `git.branch.add`    | Create git branch with permissions           |
 | `git.branch.remove` | Remove branch and cleanup                    |
@@ -195,13 +175,13 @@ before the rest of the storage discussion.
 holds `repos/` and `branches/`) MUST also be persistent.** The database
 stores absolute paths to every repository clone and every branch on
 disk. If the database survives a pod restart but the filesystem does not
-— for example, the database is backed by a `PersistentVolumeClaim` while
-`$HOME` is an `emptyDir` — then on redeploy the daemon will reference
+(for example, the database is backed by a `PersistentVolumeClaim` while
+`$HOME` is an `emptyDir`), then on redeploy the daemon will reference
 paths that no longer exist. Opening a terminal or running a session will
 fail when the executor tries to `chdir` into a directory that's gone.
 
 The daemon will surface a clear error in this state (`cwd does not exist
-on disk: ...` — see [issue
+on disk: ...`, see [issue
 \#1109](https://github.com/preset-io/agor/issues/1109)), but the only
 real fix is to restore the volume or, if the volume is unrecoverable,
 clean up the orphan database rows using
@@ -212,7 +192,7 @@ Safe configurations:
 - **Both persistent**: Database on PVC, `$HOME` (or `data_home`) on
   PVC/EFS/NFS. Recommended for production.
 - **Both ephemeral**: Database on `emptyDir`, `$HOME` on `emptyDir`. Fine
-  for short-lived test pods — everything resets together.
+  for short-lived test pods. Everything resets together.
 - **Avoid mixing**: Persistent database + ephemeral filesystem is the
   broken state described above.
 
@@ -380,7 +360,32 @@ execution:
 | `{unix_user_uid}` | Target Unix UID                         | `1001`                |
 | `{unix_user_gid}` | Target Unix GID                         | `1001`                |
 | `{session_id}`    | Agor session ID (if available)          | `01abc123...`         |
-| `{branch_id}`   | Branch ID (if available)              | `01xyz789...`         |
+| `{branch_id}`     | Branch ID (if available)                | `01xyz789...`         |
+| `{tenant_id}`     | Trusted ambient tenant ID                | `tenant-abc`          |
+
+`{tenant_id}` comes from the authenticated operation's ambient tenant context
+and is rendered as one shell-escaped argument because tenant identity may
+originate in an external authentication claim. Use the placeholder unquoted,
+for example `launcher --tenant-id {tenant_id}`. If a template references
+`{tenant_id}` but no tenant context is active, Agor refuses to execute the
+template instead of passing a literal or empty tenant value. In
+`required_from_auth` mode, every executor launch requires an active tenant
+context, whether or not its template uses the placeholder.
+
+`{unix_user}` is validated against the Unix-username format and Agor refuses
+to execute the template when the value is malformed — it is rendered into a
+`sh -c` command and commonly used as a path segment for per-user home mounts.
+In `unix_user_mode: delegated` it carries the session user's `unix_username`;
+in `insulated`/`strict` it carries the resolved impersonation identity.
+
+> **Codex subscription credentials caveat:** daemon-side Codex login flows
+> (paste-import, device sign-in, logout) write `~/.codex/auth.json` on the
+> **daemon host**. When executors run through a command template, their home
+> directory is typically provided by the container/orchestration layer, so a
+> daemon-managed credential file may never reach the executor. In
+> `unix_user_mode: delegated` these flows are rejected with a clear message;
+> in `simple` with a template they still write the daemon-host file — sign in
+> to Codex from a branch terminal or inside a session instead.
 
 ### How It Works
 
@@ -1031,6 +1036,57 @@ execution:
       --overrides='{"spec":{"securityContext":{"runAsUser":{unix_user_uid},"fsGroup":{unix_user_gid}}}}' \
       -- agor-executor --stdin
 ```
+
+### Upgrade Remote Executors with the Daemon
+
+Remote executors may be deployed independently, but they are part of the same
+runtime contract as the daemon. Upgrade remote executor images to the same Agor
+release when upgrading the daemon; mixed-version daemon/executor deployments are
+not a supported rollout mode. Before downgrading to a release that predates the
+`dispatching` state, stop or settle pending dispatches with the current daemon.
+
+### SDK Health Watchdog
+
+Agor can detect an executor whose wrapper is alive but whose SDK stream stops
+making progress. The watchdog starts in observe-only mode so upgrades collect
+diagnostics without stopping work:
+
+```yaml
+execution:
+  sdk_watchdog:
+    mode: observe # disabled | observe | enforce
+    first_progress_timeout_ms: 180000
+    abort_grace_ms: 15000
+    claude_idle_timeout_ms: 3600000 # null disables Claude's post-progress check
+```
+
+`observe` records what would have fired. Use `enforce` only after reviewing
+real-workload diagnostics for false positives; `disabled` is the rollback
+switch. Unknown SDK events fail open while they continue, permission/input
+waits pause the clock, and known active Claude tools are not timed out.
+
+SDK activity facts share the existing executor heartbeat transport. Disabling
+`execution.executor_heartbeat.enabled` therefore disables persisted pulse
+diagnostics and the stale-wrapper backstop, but the executor-local watchdog and
+its direct failure report remain active.
+
+User Stop first persists the Task's `stopping` state. That normal realtime Task
+patch travels over the executor's authenticated WebSocket, so the executor can
+abort its SDK and run provider cleanup regardless of which host or pod runs the
+daemon. Reconnecting executors read the durable Task state instead of relying on
+an ephemeral cancellation event. The executor reports quiescence only after its
+SDK and stop hooks return.
+
+For locally spawned executors, Agor additionally verifies process-group absence
+before the session becomes promptable; a short cooperative grace is followed by
+SIGTERM/SIGKILL only when the wrapper does not exit itself. A scoped remote
+executor's quiescence report is the authoritative cooperative result because
+the daemon cannot inspect a process group on another host. Missing reports still
+flow through the heartbeat supervisor and remain visible and blocked rather
+than being treated as proof of termination. OpenCode server-side execution also
+remains unverified. After an abrupt daemon restart, Agor keeps its existing
+orphan cleanup behavior; diagnostics disclose that logical release does not
+prove remote process termination.
 
 ### Step 5: Test Single Executor
 

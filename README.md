@@ -1,4 +1,4 @@
-<img src=".github/logo_circle.png" alt="Agor logo" width="92" />
+<img src="apps/agor-docs/public/logo-mark.svg" alt="Agor logo" width="92" height="92" />
 
 # Agor
 
@@ -280,11 +280,25 @@ for the agent-oriented map of the codebase.
 
 ## License
 
-[Business Source License 1.1](LICENSE).
+[Business Source License 1.1](LICENSE) (`BUSL-1.1`). Agor is source-available,
+not open source, before the Change Date.
+
+The Additional Use Grant permits production use, including internal and
+self-hosted commercial use. It does not permit commercializing Agor itself by
+offering its agent-orchestration functionality to third parties as a product or
+service, whether hosted, managed, or bundled for customers to operate.
+Consulting, support, integration, modification, use within a broader product or
+service, and single-customer internal deployments remain permitted subject to
+the license terms. Contact Preset, Inc. about alternative commercial licensing.
+
+On **January 15, 2029**, or the fourth anniversary of the first public BSL
+distribution of a particular version (whichever comes first), that version
+converts to the **Apache License 2.0**. The [license text](LICENSE) controls if
+this summary differs from it.
 
 ## About
 
-**Heavily prompted by [@mistercrunch](https://github.com/mistercrunch)** ([Preset](https://preset.io),
+**Heavily prompted by [@mistercrunch](https://github.com/mistercrunch)** ([Preset](https://preset.io?utm_source=agor&utm_medium=referral&utm_campaign=agor-readme),
 [Apache Superset](https://github.com/apache/superset), [Apache Airflow](https://github.com/apache/airflow)),
 built by an army of Claudes and Codexes.
 

@@ -28,11 +28,6 @@ function createSessionData(overrides?: Partial<Session>): Partial<Session> {
     agentic_tool: overrides?.agentic_tool ?? 'claude-code',
     status: overrides?.status ?? SessionStatus.IDLE,
     created_by: overrides?.created_by ?? 'test-user',
-    git_state: overrides?.git_state ?? {
-      ref: 'main',
-      base_sha: 'abc123',
-      current_sha: 'def456',
-    },
     tasks: overrides?.tasks ?? [],
     contextFiles: overrides?.contextFiles ?? [],
     genealogy: overrides?.genealogy ?? {
@@ -103,11 +98,6 @@ function createPostgresStyleSessionRow(overrides?: Partial<SessionRow> & { tenan
     archived: false,
     archived_reason: null,
     data: {
-      git_state: {
-        ref: 'main',
-        base_sha: 'abc123',
-        current_sha: 'def456',
-      },
       genealogy: { children: [] },
       contextFiles: [],
       tasks: [],
@@ -136,6 +126,20 @@ describe('SessionRepository row mapping', () => {
     expect(Object.keys(session)).not.toContain('tenant_id');
     expect(JSON.stringify(session)).not.toContain('tenant_id');
   });
+
+  it('does not expose legacy session-level git_state JSON', () => {
+    const repo = new SessionRepository({} as never);
+    const row = createPostgresStyleSessionRow({
+      data: {
+        genealogy: { children: [] },
+        contextFiles: [],
+        tasks: [],
+        git_state: { ref: 'main', base_sha: 'old', current_sha: 'old' },
+      } as SessionRow['data'],
+    });
+
+    expect(rowToSessionForTest(repo, row)).not.toHaveProperty('git_state');
+  });
 });
 
 // ============================================================================
@@ -162,11 +166,6 @@ describe('SessionRepository.create', () => {
     expect(created.description).toBe('Test description');
     expect(created.created_at).toBeDefined();
     expect(created.last_updated).toBeDefined();
-    expect(created.git_state).toEqual({
-      ref: 'main',
-      base_sha: 'abc123',
-      current_sha: 'def456',
-    });
   });
 
   dbTest('should generate session_id if not provided', async ({ db }) => {
@@ -975,22 +974,37 @@ describe('SessionRepository.update', () => {
         mode: 'bypassPermissions',
       },
       tasks: [task1, task2],
-      git_state: {
-        ref: 'feature-branch',
-        base_sha: 'xyz789',
-        current_sha: 'uvw456',
-      },
       custom_context: { foo: 'baz', newField: 123 },
     });
 
     expect(updated.permission_config?.mode).toBe('bypassPermissions');
     expect(updated.tasks).toEqual([task1, task2]);
-    expect(updated.git_state).toEqual({
-      ref: 'feature-branch',
-      base_sha: 'xyz789',
-      current_sha: 'uvw456',
-    });
     expect(updated.custom_context).toEqual({ foo: 'baz', newField: 123 });
+  });
+
+  dbTest('should preserve, set, and clear sdk_session_id through updates', async ({ db }) => {
+    const repo = new SessionRepository(db);
+    const branch = await createTestBranch(db);
+    const session = await repo.create(
+      createSessionData({
+        branch_id: branch.branch_id,
+        sdk_session_id: 'existing-sdk-session-id',
+      })
+    );
+
+    const preserved = await repo.update(session.session_id, {
+      sdk_session_id: undefined,
+    });
+    expect(preserved.sdk_session_id).toBe('existing-sdk-session-id');
+
+    const set = await repo.update(session.session_id, {
+      sdk_session_id: 'replacement-sdk-session-id',
+    });
+    expect(set.sdk_session_id).toBe('replacement-sdk-session-id');
+
+    const cleared = await repo.update(session.session_id, { sdk_session_id: null });
+    expect(cleared.sdk_session_id).toBeUndefined();
+    expect((await repo.findById(session.session_id))?.sdk_session_id).toBeUndefined();
   });
 
   dbTest('should update last_updated timestamp', async ({ db }) => {

@@ -10,6 +10,7 @@ import {
   PublicBaseUrlNotConfiguredError,
   requirePublicBaseUrl,
   resolveExecutionSecurityMode,
+  resolveMultiTenancyConfig,
 } from '@agor/core/config';
 import {
   and,
@@ -44,22 +45,22 @@ import type {
   UserID,
   UUID,
 } from '@agor/core/types';
-import {
-  AGENTIC_TOOL_CAPABILITIES,
-  isSessionExecuting,
-  isTaskExecuting,
-  ROLES,
-  SessionStatus,
-  TaskStatus,
-} from '@agor/core/types';
+import { ROLES, TaskStatus } from '@agor/core/types';
 import type { UnixUserMode } from '@agor/core/unix';
 import type express from 'express';
 import type {
   BoardsServiceImpl,
   MessagesServiceImpl,
   SessionsServiceImpl,
+  TasksServiceImpl,
 } from './declarations.js';
-import { trackExecutorProcess, untrackExecutorProcess } from './executor-tracking.js';
+import {
+  getTrackedExecutor,
+  markExecutorProcessExited,
+  trackExecutorProcess,
+} from './executor-tracking.js';
+import { shouldRegisterLocalHostOperations } from './host/availability.js';
+import { createLocalDaemonHostOperations } from './host/local/local-daemon-host-operations.js';
 import { runInOAuthTenantScope } from './oauth-auth-helpers.js';
 import {
   cacheOAuth21Token,
@@ -80,8 +81,10 @@ import { createCardTypesService } from './services/card-types.js';
 import { createCardsService } from './services/cards.js';
 import { createCheckAuthService } from './services/check-auth.js';
 import { createClaudeModelsService } from './services/claude-models.js';
+import { createCodexAuthImportService } from './services/codex-auth-import.js';
+import { createCodexAuthLogoutService } from './services/codex-auth-logout.js';
+import { createCodexDeviceAuthService } from './services/codex-device-auth.js';
 import { createConfigService } from './services/config.js';
-import { createContextService } from './services/context.js';
 import { createCopilotModelsService } from './services/copilot-models.js';
 import { createCursorModelsService } from './services/cursor-models.js';
 import { prepareSessionForExecutorStart } from './services/executor-startup.js';
@@ -122,12 +125,14 @@ import { createSessionMCPServersService } from './services/session-mcp-servers.j
 import { createSessionStreamsService } from './services/session-streams.js';
 import { createSessionsService } from './services/sessions.js';
 import { createTasksService } from './services/tasks.js';
+import { TASKS_SERVICE_CUSTOM_EVENTS } from './services/tasks-events.js';
 import { createTemplatesService } from './services/templates.js';
 import { createTenantAgenticToolSettingsService } from './services/tenant-agentic-tools.js';
 import { TerminalsService } from './services/terminals.js';
 import { createThreadSessionMapService } from './services/thread-session-map.js';
 import { createUsersService } from './services/users.js';
 import { userRoomName } from './setup/socketio.js';
+import { requestExecutorTermination } from './termination-coordinator.js';
 import { appendSystemMessage } from './utils/append-system-message.js';
 import { requireMinimumRole } from './utils/authorization.js';
 import { emitServiceEvent } from './utils/emit-service-event.js';
@@ -136,14 +141,8 @@ import {
   shouldExposeMCPServerSecrets,
   shouldExposeMCPServerSecretsForSessionToken,
 } from './utils/mcp-header-secrets.js';
-import {
-  computeFileHash,
-  findCodexSessionFile,
-  getCodexHome,
-  getSessionFilePath,
-} from './utils/session-state.js';
-import { pullIfNeeded, pushAsync } from './utils/session-state-hooks.js';
 import { spawnExecutor } from './utils/spawn-executor.js';
+import { classifyExecutorExit } from './utils/task-launch-state.js';
 
 /**
  * Interface for dependencies needed by service registration.
@@ -211,6 +210,7 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   const { initMcpTokens } = await import('./mcp/tokens.js');
   initMcpTokens({
     db,
+    multiTenancy: resolveMultiTenancyConfig(config),
     expirationMs: config.execution?.mcp_token_expiration_ms,
   });
 
@@ -242,6 +242,17 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   app.service('/session-streams').publish(() => []);
 
   app.use('/tasks', createTasksService(db, app), {
+    methods: [
+      'find',
+      'get',
+      'create',
+      'patch',
+      'remove',
+      'connectExecutor',
+      'reportTerminationComplete',
+      'reportRuntimeTelemetry',
+      'reportSdkHealthFailure',
+    ],
     // Custom events not in this list are dropped at the FeathersJS transport
     // boundary — they fire on the local EventEmitter but never reach socket
     // clients. Keep this in sync with every `app.service('tasks').emit(...)`
@@ -253,7 +264,7 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
     //      task.
     //   - 'tool:start' / 'tool:complete' / 'thinking:chunk': forwarded from
     //      the executor for live tool/thinking visualization.
-    events: ['queued', 'tool:start', 'tool:complete', 'thinking:chunk', 'failed'],
+    events: [...TASKS_SERVICE_CUSTOM_EVENTS],
   });
   app.use('/leaderboard', createLeaderboardService(db));
   const messagesService = createMessagesService(db) as unknown as MessagesServiceImpl;
@@ -348,7 +359,18 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   // ['created','updated','patched','removed'], so without this it
   // fires locally on the server's EventEmitter and never reaches any
   // socket. See queryArtifactRuntime in services/artifacts.ts.
-  app.use('/artifacts', createArtifactsService(db, app), { events: ['agor-query'] });
+  app.use('/artifacts', createArtifactsService(db, app), {
+    events: ['agor-query'],
+    methods: [
+      'find',
+      'get',
+      'create',
+      'patch',
+      'remove',
+      'publishFromExecutor',
+      'validateFromExecutor',
+    ],
+  });
   app.use('/board-comments', createBoardCommentsService(db));
 
   // ============================================================================
@@ -364,7 +386,6 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
       'patch',
       'remove',
       'updateEnvironment',
-      'initializeUnixGroup',
       'ensureTeammateKnowledgeNamespace',
     ],
   });
@@ -408,12 +429,14 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   }
 
   app.use('/repos', createReposService(db, app), {
-    methods: ['find', 'get', 'create', 'update', 'patch', 'remove', 'initializeUnixGroup'],
+    methods: ['find', 'get', 'create', 'update', 'patch', 'remove'],
   });
 
   // First-class schedules. RBAC hooks wired in register-hooks.ts.
   // See docs/internal/schedules-first-class-design-2026-05-24.md §4.4.
-  app.use('/schedules', createSchedulesService(db));
+  app.use('/schedules', createSchedulesService(db), {
+    methods: ['find', 'get', 'create', 'patch', 'remove'],
+  });
 
   // ============================================================================
   // Knowledge (backend/data foundations)
@@ -480,7 +503,9 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   // ============================================================================
 
   {
-    app.use('/gateway-channels', createGatewayChannelsService(db));
+    app.use('/gateway-channels', createGatewayChannelsService(db), {
+      methods: ['find', 'get', 'create', 'patch', 'remove', 'uploadFileStreamFromExecutor'],
+    });
 
     // Sub-path service for the connection probe. A sub-path does NOT inherit
     // the parent gateway-channels admin gating / redaction hooks, so it carries
@@ -519,7 +544,7 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
     });
 
     const uiUrl = ctx.bundledUiAvailable ? `${daemonUrl}/ui` : `http://localhost:${ctx.UI_PORT}`;
-    registerGitHubAppSetupRoutes(app, { uiUrl, daemonUrl, db });
+    registerGitHubAppSetupRoutes(app, { uiUrl, daemonUrl, db, config: ctx.config });
   }
 
   // ============================================================================
@@ -528,7 +553,12 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
 
   const configService = createConfigService(db);
   configService.app = app;
-  app.use('/admin/local-actions', createLocalActionsService());
+  // Host ACL/user/group operations exist only on a self-hosted daemon host. Hosted
+  // registration is intentionally absent rather than forwarding privileged
+  // work through an impersonated executor.
+  if (shouldRegisterLocalHostOperations(config)) {
+    app.use('/admin/local-actions', createLocalActionsService(createLocalDaemonHostOperations()));
+  }
 
   app.use('/agentic-tool-settings', createTenantAgenticToolSettingsService(db));
   app.service('/agentic-tool-settings').hooks({ before: { all: [ctx.requireAuth] } });
@@ -549,6 +579,27 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
 
   app.use('/check-auth', createCheckAuthService(db));
   app.service('/check-auth').hooks({ before: { create: [ctx.requireAuth] } });
+
+  // Imports a pasted Codex CLI auth.json for the authenticated user — writes
+  // it 0600 into the Unix identity that runs Codex and flips their auth
+  // method to subscription. Token material never leaves the daemon.
+  app.use('/codex-auth/import', createCodexAuthImportService(app, db));
+  app.service('/codex-auth/import').hooks({ before: { create: [ctx.requireAuth] } });
+
+  // ChatGPT device-code sign-in: create starts an attempt (code + verification
+  // URL back to the UI, daemon polls OpenAI for approval); find reports the
+  // caller's attempt status. Tokens stay daemon-side end to end.
+  app.use('/codex-auth/device', createCodexDeviceAuthService(app, db));
+  app
+    .service('/codex-auth/device')
+    .hooks({ before: { create: [ctx.requireAuth], find: [ctx.requireAuth] } });
+
+  // Removes the caller's Codex login — deletes their auth.json as the right Unix
+  // identity and clears the stored codex auth method (emitting `patched` so the
+  // UI re-probes to disconnected). Server-local only; does not revoke the OAuth
+  // grant, so other machines stay signed in.
+  app.use('/codex-auth/logout', createCodexAuthLogoutService(app, db));
+  app.service('/codex-auth/logout').hooks({ before: { create: [ctx.requireAuth] } });
 
   // Claude dynamic model discovery via @anthropic-ai/sdk's models.list().
   // Resolves ANTHROPIC_API_KEY per-user (with config.yaml + env fallback)
@@ -573,8 +624,7 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   const { UsersRepository, SessionRepository } = await import('@agor/core/db');
   const usersRepository = new UsersRepository(db);
   const sessionsRepository = new SessionRepository(db);
-  app.use('/context', createContextService(branchRepository));
-  app.use('/file', createFileService(branchRepository));
+  app.use('/file', createFileService(branchRepository, db, app));
   app.use('/files', createFilesService(db, app));
 
   // Server-side Handlebars renderer. UI calls POST /templates so the browser
@@ -746,22 +796,6 @@ function createExecuteHandler(
       throw new Error('Preset-backed sessions cannot override permission mode per task');
     }
 
-    // Validate stateless_fs_mode compatibility with agentic tool
-    if (config.execution?.stateless_fs_mode) {
-      const toolName = session.agentic_tool as import('@agor/core/types').AgenticToolName;
-      const capabilities = AGENTIC_TOOL_CAPABILITIES[toolName];
-      if (capabilities && !capabilities.supportsStatelessFsMode) {
-        const supported = Object.entries(AGENTIC_TOOL_CAPABILITIES)
-          .filter(([, caps]) => caps.supportsStatelessFsMode)
-          .map(([name]) => name)
-          .join(', ');
-        throw new Error(
-          `stateless_fs_mode is enabled but tool '${toolName}' does not support it. ` +
-            `Supported tools: ${supported}`
-        );
-      }
-    }
-
     // Generate session token for executor authentication
     const appWithExecutor = app as unknown as {
       sessionTokenService?: import('./services/session-token-service.js').SessionTokenService;
@@ -800,12 +834,8 @@ function createExecuteHandler(
     }
 
     // Determine Unix user for executor
-    const {
-      resolveUnixUserForImpersonation,
-      validateResolvedUnixUser,
-      UnixUserNotFoundError,
-      getHomedirFromUsername,
-    } = await import('@agor/core/unix');
+    const { resolveUnixUserForImpersonation, validateResolvedUnixUser, UnixUserNotFoundError } =
+      await import('@agor/core/unix');
 
     const unixUserMode = (config.execution?.unix_user_mode ?? 'simple') as UnixUserMode;
     const configExecutorUser = config.execution?.executor_unix_user;
@@ -861,6 +891,20 @@ function createExecuteHandler(
               }
             })(),
           }));
+        }
+        // Merge connector-provided session credentials (e.g. Shortcut's API
+        // token, which the media-intake skill uses to fetch ticket
+        // attachments) as defaults. Operator `agentic_config.envVars` above
+        // take precedence — a key already present is not overwritten.
+        if (channel) {
+          const { getConnector } = await import('@agor/core/gateway');
+          const connectorEnv =
+            getConnector(channel.channel_type, channel.config).sessionEnv?.() ?? [];
+          if (connectorEnv.length > 0) {
+            const present = new Set((gatewayEnv ?? []).map((e) => e.key));
+            const defaults = connectorEnv.filter((e) => !present.has(e.key));
+            if (defaults.length > 0) gatewayEnv = [...(gatewayEnv ?? []), ...defaults];
+          }
         }
       }
 
@@ -930,158 +974,97 @@ function createExecuteHandler(
       },
     };
 
-    // Stateless FS mode: resolve executor home dir for session file path
-    const executorHomeDir = executorUnixUser ? getHomedirFromUsername(executorUnixUser) : undefined;
-
-    // Stateless FS mode: restore session file from DB before executor starts
-    if (config.execution?.stateless_fs_mode && session.sdk_session_id) {
-      try {
-        await pullIfNeeded({
-          db,
-          sessionId,
-          sdkSessionId: session.sdk_session_id,
-          branchPath: cwd,
-          tool: session.agentic_tool,
-          executorHomeDir,
-        });
-      } catch (err) {
-        console.error(
-          '[stateless-fs] pullIfNeeded failed:',
-          err instanceof Error ? err.message : err
-        );
-        // Don't block the executor — proceed with potentially stale/missing session file
-      }
-    }
-
     const logPrefix = `[Executor ${shortId(sessionId)}]`;
 
+    let localExecutorPid: number | undefined;
     spawnExecutor(executorPayload, {
-      cwd,
       asUser: executorUnixUser || undefined,
       preparedEnv: executorEnv,
       logPrefix,
       templateVariables: {
         session_id: sessionId,
         task_id: taskId,
-        unix_user: executorUnixUser || undefined,
+        // Mode-resolved identity for the execution substrate: the sudo user in
+        // insulated/strict, the session's unix_username in delegated (no sudo),
+        // and unset in simple. Supersedes the interim
+        // `sessionUnixUser || executorUnixUser` ordering from #2082, which
+        // shadowed insulated mode's configured executor identity.
+        unix_user: impersonationResult.reportedUnixUser || undefined,
       },
-      onSpawn: (child) => {
-        if (child.pid) {
-          trackExecutorProcess(sessionId, child.pid);
+      onSpawn: (child, spawnContext) => {
+        if (spawnContext.mode === 'local' && child.pid) {
+          localExecutorPid = child.pid;
+          trackExecutorProcess({
+            sessionId,
+            taskId,
+            pid: child.pid,
+            ...(executorUnixUser ? { asUser: executorUnixUser } : {}),
+          });
           console.log(`${logPrefix} PID: ${child.pid}`);
         }
       },
-      onExit: async (code) => {
+      onExit: async (code, spawnContext) => {
         console.log(`${logPrefix} Exited with code ${code}`);
-        untrackExecutorProcess(sessionId);
 
-        // Safety net: check if task is still running
-        try {
-          const currentSession = await app.service('sessions').get(sessionId, params);
-          const latestTaskId = currentSession.tasks?.[currentSession.tasks.length - 1];
+        if (spawnContext.mode === 'local') markExecutorProcessExited(sessionId, localExecutorPid);
 
-          if (latestTaskId && latestTaskId !== taskId) {
-            console.log(
-              `⏭️ [Executor] Task ${shortId(taskId)} is not the latest (latest: ${shortId(latestTaskId)}), skipping safety net`
-            );
-          } else if (
-            isSessionExecuting(currentSession) ||
-            currentSession.status === SessionStatus.TIMED_OUT
-          ) {
-            try {
-              const currentTask = await app.service('tasks').get(taskId, params);
-              if (isTaskExecuting(currentTask) || currentTask.status === TaskStatus.TIMED_OUT) {
-                await app.service('tasks').patch(
+        if (spawnContext.mode === 'templated') {
+          const disposition = classifyExecutorExit({
+            mode: spawnContext.mode,
+            code,
+            nonzeroMayHaveDispatched:
+              config.execution?.executor_command_nonzero_may_have_dispatched === true,
+          });
+          if (disposition !== 'authoritative') {
+            if (disposition === 'ambiguous') {
+              try {
+                await (
+                  app.service('tasks') as unknown as TasksServiceImpl
+                ).recordExecutorStartupWarning(
                   taskId,
-                  {
-                    status: TaskStatus.FAILED,
-                    error_message: `Executor exited unexpectedly with code ${code ?? 'unknown'}.`,
-                  },
-                  params
+                  `Executor launcher exited with code ${code ?? 'unknown'}, but configuration says remote work may have been dispatched.`,
+                  { ...params, provider: undefined }
                 );
-                console.log(
-                  `✅ [Executor] Task ${shortId(taskId)} marked as FAILED after executor exit (code: ${code})`
-                );
-              } else {
-                console.log(
-                  `⚠️  [Executor] Task ${shortId(taskId)} already ${currentTask.status}, but session still ${currentSession.status} — repairing session state`
-                );
-                await app
-                  .service('sessions')
-                  .patch(sessionId, { status: SessionStatus.IDLE, ready_for_prompt: true }, params);
+              } catch (error) {
+                console.warn(`${logPrefix} Failed to record ambiguous launcher exit:`, error);
               }
-            } catch (taskError) {
-              console.error(
-                `⚠️  [Executor] Failed to mark task ${shortId(taskId)} as FAILED, falling back to session IDLE update:`,
-                taskError
-              );
-              await app
-                .service('sessions')
-                .patch(sessionId, { status: SessionStatus.IDLE, ready_for_prompt: true }, params);
-              console.log(
-                `✅ [Executor] Session ${shortId(sessionId)} status updated to IDLE after executor exit (was: ${currentSession.status})`
-              );
             }
-          } else {
             console.log(
-              `ℹ️  [Executor] Session ${shortId(sessionId)} already in ${currentSession.status} state, skipping IDLE update`
+              `${logPrefix} Launcher exit is passive; awaiting remote executor lifecycle`
             );
+            return;
           }
-        } catch (error) {
-          console.error(`❌ [Executor] Failed to handle executor exit:`, error);
         }
 
-        // Stateless FS mode: serialize session file to DB after executor exits
-        if (config.execution?.stateless_fs_mode) {
-          try {
-            // Re-fetch session to get sdk_session_id (may have been set during execution)
-            const freshSession = await app.service('sessions').get(sessionId, params);
-            if (freshSession.sdk_session_id) {
-              pushAsync({
-                db,
-                sessionId,
-                branchId: freshSession.branch_id,
-                taskId,
-                sdkSessionId: freshSession.sdk_session_id,
-                branchPath: cwd,
-                tool: freshSession.agentic_tool,
-                executorHomeDir,
-              });
-
-              // Also compute and write session_md5 to the task record
-              try {
-                let filePath: string;
-                if (freshSession.agentic_tool === 'codex') {
-                  const codexHome = getCodexHome(executorHomeDir);
-                  const found = await findCodexSessionFile(codexHome, freshSession.sdk_session_id);
-                  filePath = found || '';
-                } else {
-                  filePath = getSessionFilePath(
-                    freshSession.agentic_tool,
-                    cwd,
-                    freshSession.sdk_session_id,
-                    executorHomeDir
-                  );
+        try {
+          const termination = await requestExecutorTermination({
+            app,
+            taskId,
+            cause: 'heartbeat_lost',
+            errorMessage: `Executor exited unexpectedly with code ${code ?? 'unknown'}.`,
+            params,
+            absenceVerified: !getTrackedExecutor(sessionId),
+            sdkFailure: {
+              reason: 'heartbeat_lost',
+              detected_at: new Date().toISOString(),
+              tool: session.agentic_tool,
+              termination: 'requested',
+            },
+            // A remote executor may connect while its launcher is exiting.
+            // Resolve that race only at the row-locked claim.
+            ...(spawnContext.mode === 'templated'
+              ? {
+                  expectedStatus: TaskStatus.DISPATCHING,
+                  requireExecutorDisconnected: true,
                 }
-                if (filePath) {
-                  const md5 = await computeFileHash(filePath);
-                  if (md5) {
-                    await app.service('tasks').patch(taskId, { session_md5: md5 }, params);
-                  }
-                }
-              } catch (md5Err) {
-                console.error(
-                  '[stateless-fs] Failed to write session_md5 to task:',
-                  md5Err instanceof Error ? md5Err.message : md5Err
-                );
-              }
-            }
-          } catch (pushErr) {
-            console.error(
-              '[stateless-fs] pushAsync setup failed:',
-              pushErr instanceof Error ? pushErr.message : pushErr
-            );
+              : {}),
+          });
+          if (termination.status === 'condition_changed') {
+            console.log(`${logPrefix} Connected executor won the launcher-exit race`);
+            return;
           }
+        } catch (error) {
+          console.error(`❌ [Executor] Failed to coordinate executor exit:`, error);
         }
 
         appWithExecutor.sessionTokenService?.revokeToken(sessionToken);
@@ -1574,6 +1557,54 @@ async function registerMCPServices(
 
   app.service('mcp-servers/test-jwt').hooks({ before: { create: [ctx.requireAuth] } });
 
+  /**
+   * Some MCP servers (e.g. Google's Gmail/Calendar remote MCP servers) allow
+   * unauthenticated `initialize`/`tools/list` and only return 401 once a real
+   * tool is invoked (auth is enforced per tool-call, not at the handshake).
+   * A bare `initialize` probe misreads these as "no auth required". Before
+   * giving up, retry against a tool the server itself marks safe to call
+   * (`readOnlyHint: true`) so we don't risk side effects on write tools.
+   * Returns the 401 Response if one is found this way, otherwise null.
+   */
+  async function probeMcpAuthViaReadOnlyToolCall(mcpUrl: string): Promise<Response | null> {
+    try {
+      const listResponse = await fetch(mcpUrl, {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', id: 1 }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!listResponse.ok) return null;
+
+      const listBody = (await listResponse.json()) as {
+        result?: { tools?: Array<{ name?: string; annotations?: { readOnlyHint?: boolean } }> };
+      };
+      const readOnlyTool = listBody.result?.tools?.find(
+        (tool) => tool.annotations?.readOnlyHint === true && typeof tool.name === 'string'
+      );
+      if (!readOnlyTool?.name) return null;
+
+      const callResponse = await fetch(mcpUrl, {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'tools/call',
+          id: 2,
+          params: { name: readOnlyTool.name, arguments: {} },
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      return callResponse.status === 401 ? callResponse : null;
+    } catch (probeError) {
+      console.log(
+        '[OAuth Probe] Read-only tool-call fallback probe failed:',
+        probeError instanceof Error ? probeError.message : String(probeError)
+      );
+      return null;
+    }
+  }
+
   // OAuth 2.0/2.1 test endpoint (large — kept inline for now)
   app.use('/mcp-servers/test-oauth', {
     async create(
@@ -1605,6 +1636,17 @@ async function registerMCPServices(
             success: false,
             error: `Failed to connect to MCP server: ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`,
           };
+        }
+
+        if (probeResponse.status !== 401) {
+          const fallbackProbe = await probeMcpAuthViaReadOnlyToolCall(data.mcp_url);
+          if (fallbackProbe) {
+            console.log(
+              '[OAuth Test] Handshake-level probe returned no auth requirement; ' +
+                'a read-only tool call did — server defers auth to tool invocation.'
+            );
+            probeResponse = fallbackProbe;
+          }
         }
 
         const wwwAuthenticate = probeResponse.headers.get('www-authenticate');
@@ -1945,12 +1987,23 @@ async function registerMCPServices(
           }
         }
 
-        const probeResponse = await fetch(data.mcp_url, {
+        let probeResponse = await fetch(data.mcp_url, {
           method: 'POST',
           headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
           body: JSON.stringify({ jsonrpc: '2.0', method: 'initialize', id: 1 }),
           signal: AbortSignal.timeout(15_000),
         });
+
+        if (probeResponse.status !== 401) {
+          const fallbackProbe = await probeMcpAuthViaReadOnlyToolCall(data.mcp_url);
+          if (fallbackProbe) {
+            console.log(
+              '[OAuth Start] Handshake-level probe returned no auth requirement; ' +
+                'a read-only tool call did — server defers auth to tool invocation.'
+            );
+            probeResponse = fallbackProbe;
+          }
+        }
 
         if (probeResponse.status !== 401) {
           return {

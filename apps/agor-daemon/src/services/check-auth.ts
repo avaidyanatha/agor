@@ -33,6 +33,9 @@ import type {
   UserID,
 } from '@agor/core/types';
 import { TOOL_API_KEY_NAMES } from '@agor/core/types';
+import { inspectCodexAuthViaExecutor } from '../utils/executor-codex-auth.js';
+import { isRealAuthSource } from './check-auth-helpers.js';
+import { resolveCodexUnixIdentity } from './codex-auth-shared.js';
 
 const FETCH_TIMEOUT_MS = 8_000;
 const SDK_AUTH_PROBE_TIMEOUT_MS = 10_000;
@@ -151,7 +154,7 @@ async function validateClaudeSubscriptionToken(token: string): Promise<AuthCheck
   // valid subscription sessions initialize without returning account metadata.
   // Only positive account metadata proves auth; absence is inconclusive and
   // must not drive the persistent "credentials aren't working" banner.
-  return probe.account?.tokenSource ? 'authenticated' : 'unknown';
+  return isRealAuthSource(probe.account?.tokenSource) ? 'authenticated' : 'unknown';
 }
 
 /**
@@ -228,10 +231,83 @@ function resultFromKeyStatus(status: AuthCheckStatus, rejectedHint: string): Aut
   return unknown('Could not reach the provider to verify this key.');
 }
 
+/**
+ * Probe the Codex `auth.json` belonging to the Unix identity that will run
+ * Codex for this user (daemon user in simple mode, shared executor user in
+ * insulated, the caller's own account in strict). File contents stay on the
+ * daemon side; only shape/metadata drive the result.
+ *
+ * An embedded API key is verified against the provider; ChatGPT login tokens
+ * cannot be verified without consuming a refresh, so a well-formed token set
+ * counts as authenticated — Codex refreshes it at session start.
+ */
+async function probeCodexAuthFile(
+  userId: UserID | undefined,
+  withTenantDatabase: <T>(work: (tenantDb: TenantScopedDatabase) => Promise<T>) => Promise<T>
+): Promise<AuthCheckResult> {
+  const identity = await resolveCodexUnixIdentity(userId, withTenantDatabase);
+  if (!identity.ok) {
+    // A missing unix_username is a real configuration gap (no credential can
+    // exist for this user yet). An unsupported mode means the daemon cannot
+    // see the credential at all (it lives in the execution substrate) — pass
+    // that explanation through. Any other resolution failure is inconclusive.
+    if (identity.reason === 'missing-username') {
+      return unauthenticated(
+        'none',
+        'Codex subscription login needs a Unix account — ask an admin to set your unix_username.'
+      );
+    }
+    if (identity.reason === 'unsupported-mode') {
+      return unknown(identity.message);
+    }
+    return unknown('Could not resolve the Unix account that holds the Codex login.');
+  }
+
+  const inspection = await inspectCodexAuthViaExecutor(identity.unixUser);
+  if (!inspection.ok) {
+    // Only a genuinely absent file proves "no login". Permission/sudo/
+    // transport failures mean we could not LOOK, which must never surface as
+    // the persistent "credentials aren't working" state.
+    return inspection.reason === 'not-found'
+      ? unauthenticated(
+          'none',
+          'No Codex login found on this server — import your auth.json or run `codex login` from a branch terminal.'
+        )
+      : inspection.reason === 'malformed'
+        ? unauthenticated(
+            'none',
+            'The Codex auth file on this server is malformed — import a fresh auth.json or run `codex login` again.'
+          )
+        : unknown(
+            'Could not inspect the Codex auth file — check executor availability and permissions.'
+          );
+  }
+
+  if (inspection.authMode === 'api_key') {
+    if (inspection.apiKeyStatus === 'authenticated') return authed('api-key');
+    if (inspection.apiKeyStatus === 'unauthenticated') {
+      return unauthenticated(
+        'api-key',
+        'The API key inside the Codex auth file was rejected — import a fresh auth.json.'
+      );
+    }
+    return unknown(
+      'Could not reach the provider to verify the API key inside the Codex auth file.'
+    );
+  }
+
+  return authed(
+    'oauth',
+    inspection.planType
+      ? `ChatGPT login found (${inspection.planType} plan).`
+      : 'ChatGPT login found.'
+  );
+}
+
 export function createCheckAuthService(db: TenantScopeAwareDatabase) {
   return {
     async create(
-      data: { tool: string; apiKey?: string },
+      data: { tool: string; apiKey?: string; validateNative?: boolean },
       params?: AuthenticatedParams
     ): Promise<AuthCheckResult> {
       const { tool, apiKey: rawKey } = data;
@@ -309,9 +385,12 @@ export function createCheckAuthService(db: TenantScopeAwareDatabase) {
       }
 
       if (tool === 'codex' && useNativeAuth) {
-        return unknown(
-          'Codex subscription login is configured for this user but can only be verified when Codex runs.'
-        );
+        // The persisted method is the cheap default used by app-shell banners.
+        // Filesystem validation can require an ephemeral Cloud executor, so it
+        // is reserved for an explicit user action.
+        return data.validateNative
+          ? probeCodexAuthFile(userId, withTenantDatabase)
+          : unknown('ChatGPT login is configured but has not been validated.');
       }
 
       if (tool === 'claude-code') {

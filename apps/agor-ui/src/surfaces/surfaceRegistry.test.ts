@@ -31,21 +31,17 @@ describe('surface route registry', () => {
     expect(routeUsesSharedUserSettings(path)).toBe(true);
   });
 
-  it.each([
-    '/',
-    '/b/board/',
-    '/s/session/',
-    '/w/branch/',
-    '/a/artifact/',
-    '/m',
-  ])('classifies %s as Workspace', (path) => {
-    expect(getRouteSurface(path).id).toBe('workspace');
-    expect(isKnowledgeRoutePath(path)).toBe(false);
-    expect(isWorkspaceRoutePath(path)).toBe(true);
-    expect(routeStartsWorkspaceRuntime(path)).toBe(true);
-    expect(routeUsesDeviceRouter(path)).toBe(true);
-    expect(routeUsesSharedUserSettings(path)).toBe(false);
-  });
+  it.each(['/', '/b/board/', '/s/session/', '/w/branch/', '/a/artifact/', '/m'])(
+    'classifies %s as Workspace',
+    (path) => {
+      expect(getRouteSurface(path).id).toBe('workspace');
+      expect(isKnowledgeRoutePath(path)).toBe(false);
+      expect(isWorkspaceRoutePath(path)).toBe(true);
+      expect(routeStartsWorkspaceRuntime(path)).toBe(true);
+      expect(routeUsesDeviceRouter(path)).toBe(true);
+      expect(routeUsesSharedUserSettings(path)).toBe(false);
+    }
+  );
 
   it.each(['/a/artifact/fullscreen'])('classifies %s as Artifact fullscreen', (path) => {
     expect(getRouteSurface(path).id).toBe('artifact-fullscreen');
@@ -63,14 +59,13 @@ describe('surface route registry', () => {
     expect(routeUsesSharedUserSettings('/demo/streamdown')).toBe(false);
   });
 
-  it.each([
-    '/demo',
-    '/demo/',
-    '/demo/anything-else',
-  ])('falls back to Workspace for unregistered demo path %s', (path) => {
-    expect(getRouteSurface(path).id).toBe('workspace');
-    expect(routeStartsWorkspaceRuntime(path)).toBe(true);
-  });
+  it.each(['/demo', '/demo/', '/demo/anything-else'])(
+    'falls back to Workspace for unregistered demo path %s',
+    (path) => {
+      expect(getRouteSurface(path).id).toBe('workspace');
+      expect(routeStartsWorkspaceRuntime(path)).toBe(true);
+    }
+  );
 
   it('does not treat similarly prefixed paths as Knowledge', () => {
     expect(isKnowledgeRoutePath('/kbish')).toBe(false);
@@ -105,16 +100,18 @@ describe('surface branding declarations', () => {
 });
 
 describe('index.html favicon', () => {
-  it('references the mark with a root-absolute href (Vite rebases to the base)', () => {
+  it('references the backed badge with a root-absolute href (Vite rebases to the base)', () => {
     // vitest runs with cwd at the package root, where index.html lives.
     const html = readFileSync(path.resolve(process.cwd(), 'index.html'), 'utf8');
     const iconMatch = html.match(/<link[^>]*rel=["']icon["'][^>]*>/i);
     expect(iconMatch, 'index.html must declare a <link rel="icon">').not.toBeNull();
 
     const href = iconMatch?.[0].match(/href=["']([^"']+)["']/i)?.[1] ?? '';
-    // Root-absolute only. A relative href (e.g. "favicon.png") 404s on nested
+    const type = iconMatch?.[0].match(/type=["']([^"']+)["']/i)?.[1] ?? '';
+    // Root-absolute only. A relative href (e.g. "logo.svg") 404s on nested
     // SPA deep-links — exactly the Knowledge-surface favicon bug.
     expect(href.startsWith('/')).toBe(true);
-    expect(href.endsWith(BRAND.markFile)).toBe(true);
+    expect(href.endsWith(BRAND.badgeFile)).toBe(true);
+    expect(type).toBe('image/svg+xml');
   });
 });

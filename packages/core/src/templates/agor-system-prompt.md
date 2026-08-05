@@ -20,7 +20,9 @@ Agor MCP tool domains:
 - mcp-servers: External MCP server configuration and OAuth
 - users: User accounts, profiles, preferences, and administration
 - analytics: Usage and cost tracking
-- proxies/widgets: HTTP proxies and in-conversation interactive widgets
+- widgets: In-conversation interactive widgets
 
 Discover tools with `agor_search_tools` and inspect schemas with
 `agor_get_tool_details`.
+
+Use portable GitHub-flavored Markdown; the Agor UI additionally renders Mermaid, math, and GitHub callouts, while gateways such as Slack support fewer constructs.

@@ -20,11 +20,11 @@
 
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as path from 'node:path';
 import type { IPty } from 'node-pty';
 import type { ExecutorResult, ZellijAttachPayload, ZellijTabPayload } from '../payload-types.js';
 import type { AgorClient } from '../services/feathers-client.js';
 import { createExecutorClient } from '../services/feathers-client.js';
+import { resolveEffectiveUserInfo } from '../user-runtime-paths.js';
 import type { CommandOptions } from './index.js';
 
 /**
@@ -36,6 +36,197 @@ let feathersClient: AgorClient | null = null;
 let _currentUserId: string | null = null;
 let currentPtyCols = 160;
 let currentPtyRows = 40;
+let currentTabName: string | undefined;
+
+/**
+ * Grace window after a socket disconnect before the executor tears down.
+ *
+ * A transient network blip or a daemon restart drops the socket, but the
+ * zellij session is long-lived and survives detach, so the PTY bridge is
+ * recoverable: the feathers client auto-reconnects (and re-authenticates)
+ * on its own. We keep the PTY + zellij session alive for this long and only
+ * exit if the socket has not come back by the time it elapses. Exiting
+ * immediately (the old behavior) turned every blip into a dead terminal that
+ * the browser still believed was connected.
+ */
+const DISCONNECT_GRACE_MS = 30_000;
+
+/** Active grace controller for the running attach, so cleanup can cancel it. */
+let graceController: ReturnType<typeof createReconnectGrace> | null = null;
+
+/**
+ * Whether the socket is not just transport-connected but actually
+ * re-authenticated as the executor service — i.e. the daemon will accept our
+ * emits again. Set true only after (re)authentication succeeds, false on
+ * disconnect. The grace window keys teardown off THIS, not raw
+ * `socket.connected`, so a socket that reconnects transport-only but never
+ * re-authenticates doesn't keep a dead PTY alive forever.
+ */
+let bridgeHealthy = false;
+
+/**
+ * Whether zellij's attach has been confirmed operational (a `zellij action`
+ * against the session succeeded), as opposed to node-pty merely having
+ * returned a PID. Gates the readiness ack so the daemon's tab choreography
+ * can't race an un-booted zellij, and gates the reconnect re-announce.
+ */
+let zellijAttached = false;
+
+/**
+ * A single-shot grace window that holds an executor alive across a socket
+ * disconnect and tears it down only if the socket has not reconnected when the
+ * window elapses. Extracted (and injectable) so the reconnect-before-exit
+ * behavior can be unit-tested without a live PTY or socket.
+ */
+export function createReconnectGrace(opts: {
+  graceMs: number;
+  isConnected: () => boolean;
+  onGraceElapsed: () => void;
+}): {
+  onDisconnect: () => void;
+  onReconnect: () => void;
+  cancel: () => void;
+  isPending: () => boolean;
+} {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const clear = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+  return {
+    onDisconnect() {
+      if (timer) return; // already counting down
+      timer = setTimeout(() => {
+        timer = null;
+        if (!opts.isConnected()) opts.onGraceElapsed();
+      }, opts.graceMs);
+    },
+    onReconnect: clear,
+    cancel: clear,
+    isPending: () => timer !== null,
+  };
+}
+
+/**
+ * Announce that the PTY exists and is attached so the daemon can gate its
+ * tab focus/redraw choreography on a real signal instead of a blind timer,
+ * and the browser can flip from "connecting" to connected. Safe to call
+ * repeatedly (initial spawn + every reconnect) — the daemon treats it as
+ * idempotent readiness.
+ */
+function emitTerminalReady(socket: AgorClient['io'], userId: string): void {
+  socket.emit('terminal:ready', {
+    userId,
+    sessionName: currentSessionName ?? undefined,
+    tabName: currentTabName,
+  });
+}
+
+// On attach/reconnect zellij leaves the UI (frame, status bar, panes) undrawn
+// until a SIGWINCH or keypress arrives — a same-size resize signals nothing, so
+// briefly change the row count and restore it to force a full repaint. Nudge up
+// when rows is at the lower bound (1 → 2 → 1) so the size always actually changes.
+export function forceZellijRepaint(
+  pty: Pick<IPty, 'resize'> | null,
+  cols: number,
+  rows: number,
+  scheduleRestore: (fn: () => void) => void = (fn) => setTimeout(fn, 50)
+): void {
+  if (!pty) return;
+  const nudged = rows > 1 ? rows - 1 : rows + 1;
+  try {
+    pty.resize(cols, nudged);
+  } catch {
+    return;
+  }
+  scheduleRestore(() => {
+    try {
+      pty.resize(cols, rows);
+    } catch {
+      // pty already gone — nothing to repaint
+    }
+  });
+}
+
+/** Longest a buffered chunk may wait before it is emitted. */
+const OUTPUT_FLUSH_INTERVAL_MS = 16;
+/** Flush early once the buffer reaches this size, regardless of the timer. */
+const OUTPUT_FLUSH_MAX_BYTES = 64 * 1024;
+
+export interface OutputCoalescer {
+  push(chunk: string): void;
+  flush(): void;
+  dispose(): void;
+}
+
+/**
+ * Coalesce rapid PTY output chunks into fewer, larger emits.
+ *
+ * node-pty's `onData` fires once per OS-level read; under heavy output
+ * (builds, `yes`, zellij full-screen redraws) that is hundreds of tiny
+ * callbacks per second, and emitting one Socket.IO frame per callback is
+ * what makes the browser terminal janky. We accumulate into a buffer and
+ * emit it as a single frame, flushing on whichever comes first:
+ *
+ *   - `setImmediate`: collapses every chunk that arrives before the event
+ *     loop next yields into one emit (the common heavy-output case), while
+ *     keeping interactive latency to a single tick.
+ *   - a `intervalMs` timer: caps how long a steady stream is held so output
+ *     still feels live.
+ *   - a `maxBytes` size cap: a runaway stream must not grow the buffer
+ *     unbounded while it waits for the timer.
+ *
+ * `intervalMs`/`maxBytes` are injectable for unit testing.
+ */
+export function createOutputCoalescer(
+  emit: (data: string) => void,
+  intervalMs: number = OUTPUT_FLUSH_INTERVAL_MS,
+  maxBytes: number = OUTPUT_FLUSH_MAX_BYTES
+): OutputCoalescer {
+  let buffer = '';
+  // Tracked separately from `buffer.length`: that counts UTF-16 code units,
+  // but the cap is about the encoded UTF-8 payload we hand to Socket.IO, so
+  // multi-byte output (box-drawing, emoji, non-Latin) must count real bytes.
+  let bufferedBytes = 0;
+  let immediate: ReturnType<typeof setImmediate> | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  function clearScheduled() {
+    if (immediate) {
+      clearImmediate(immediate);
+      immediate = null;
+    }
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  }
+
+  function flush() {
+    clearScheduled();
+    if (buffer.length === 0) return;
+    const data = buffer;
+    buffer = '';
+    bufferedBytes = 0;
+    emit(data);
+  }
+
+  function push(chunk: string) {
+    if (chunk.length === 0) return;
+    buffer += chunk;
+    bufferedBytes += Buffer.byteLength(chunk, 'utf8');
+    if (bufferedBytes >= maxBytes) {
+      flush();
+      return;
+    }
+    if (!immediate) immediate = setImmediate(flush);
+    if (!timer) timer = setTimeout(flush, intervalMs);
+  }
+
+  return { push, flush, dispose: flush };
+}
 
 /**
  * Return a short, per-user socket base unless the operator supplied one.
@@ -61,7 +252,9 @@ export async function handleZellijAttach(
   payload: ZellijAttachPayload,
   options: CommandOptions
 ): Promise<ExecutorResult> {
-  const { userId, sessionName, cwd, tabName, cols, rows, envFile } = payload.params;
+  const { userId, sessionName, tabName, cols, rows } = payload.params;
+  const effectiveUser = resolveEffectiveUserInfo();
+  const cwd = payload.params.cwd || effectiveUser.homedir;
 
   // Dry run mode
   if (options.dryRun) {
@@ -92,10 +285,28 @@ export async function handleZellijAttach(
   }
 
   try {
-    // Connect to daemon
+    // Connect to daemon. On reconnect, the socket is fresh: it has left the
+    // terminal channel room and a restarted daemon has forgotten this
+    // executor. Re-join and re-announce readiness once re-authenticated so
+    // input keeps flowing and the daemon rediscovers the live bridge.
     const daemonUrl = payload.daemonUrl || 'http://localhost:3030';
-    feathersClient = await createExecutorClient(daemonUrl, payload.sessionToken);
+    feathersClient = await createExecutorClient(daemonUrl, payload.sessionToken, {
+      // Fires only after a reconnect RE-AUTHENTICATES (not on raw transport
+      // connect). This is when the daemon will accept our emits again, so it's
+      // the only safe point to mark the bridge healthy, cancel the pending
+      // teardown, re-join the channel, and re-announce readiness.
+      onReauthenticated: () => {
+        bridgeHealthy = true;
+        graceController?.onReconnect();
+        const s = feathersClient?.io;
+        if (!s) return;
+        s.emit('join', `user/${userId}/terminal`);
+        if (ptyProcess && zellijAttached) emitTerminalReady(s, userId);
+      },
+    });
     _currentUserId = userId;
+    // Initial connect + authenticate already succeeded inside createExecutorClient.
+    bridgeHealthy = true;
 
     console.log(`[zellij.attach] Connected to daemon, joining channel user/${userId}/terminal`);
 
@@ -104,17 +315,32 @@ export async function handleZellijAttach(
     const socket = feathersClient.io;
     socket.emit('join', `user/${userId}/terminal`);
 
-    // Handle socket disconnect gracefully
-    // This happens when daemon restarts (watch mode) - just exit cleanly
-    // A new executor will be spawned when user reopens terminal
+    graceController = createReconnectGrace({
+      graceMs: DISCONNECT_GRACE_MS,
+      // Key teardown off re-authentication, NOT raw transport connectivity: a
+      // socket can be transport-connected yet unauthenticated (reauth failing),
+      // in which case the bridge is dead and we should still exit.
+      isConnected: () => bridgeHealthy,
+      onGraceElapsed: () => {
+        console.log('[zellij.attach] Reconnect grace elapsed without a healthy bridge — exiting');
+        if (ptyProcess) {
+          ptyProcess.kill();
+          ptyProcess = null;
+        }
+        process.exit(0);
+      },
+    });
+
+    // A disconnect is recoverable — hold the PTY through a grace window and let
+    // the client's auto-reconnect + re-auth restore the bridge. The teardown is
+    // cancelled in onReauthenticated (above), not on raw `connect`, so a
+    // transport-only reconnect that never re-authenticates still tears down.
     socket.on('disconnect', (reason: string) => {
-      console.log(`[zellij.attach] Socket disconnected: ${reason}`);
-      // Clean up and exit gracefully instead of crashing
-      if (ptyProcess) {
-        ptyProcess.kill();
-        ptyProcess = null;
-      }
-      process.exit(0);
+      bridgeHealthy = false;
+      console.log(
+        `[zellij.attach] Socket disconnected: ${reason} — holding PTY for ${DISCONNECT_GRACE_MS}ms pending re-auth`
+      );
+      graceController?.onDisconnect();
     });
 
     // Import node-pty dynamically (native module)
@@ -132,26 +358,10 @@ export async function handleZellijAttach(
     delete cleanEnv.ZELLIJ_SESSION_NAME;
     delete cleanEnv.ZELLIJ_PANE_ID;
 
-    // Get actual home directory and shell for current user from passwd
-    // os.homedir() doesn't work correctly with sudo impersonation - it returns the original user's home
-    // We must use getent passwd to get the correct values for the impersonated user
-    const { execSync } = await import('node:child_process');
-
-    let actualHome = '/tmp'; // Fallback
-    let userShell = '/bin/bash'; // Fallback
-    try {
-      const passwdEntry = execSync(`getent passwd $(whoami)`, { encoding: 'utf-8' }).trim();
-      const fields = passwdEntry.split(':');
-      // passwd format: name:password:uid:gid:gecos:home:shell
-      if (fields.length >= 6 && fields[5]) {
-        actualHome = fields[5];
-      }
-      if (fields.length >= 7 && fields[6]) {
-        userShell = fields[6];
-      }
-    } catch (err) {
-      console.error(`[zellij.attach] Failed to get user info from passwd:`, err);
-    }
+    // The executor already runs as the resolved identity. Resolve runtime
+    // paths here rather than asking the daemon to inspect another user's home.
+    const actualHome = effectiveUser.homedir;
+    const userShell = effectiveUser.shell;
     console.log(`[zellij.attach] User home: ${actualHome}, shell: ${userShell}`);
 
     // Ensure Zellij cache directory exists - useradd -m creates home but not .cache/zellij
@@ -190,22 +400,26 @@ export async function handleZellijAttach(
 
     ptyProcess = pty;
     currentSessionName = sessionName; // Store for tab management
+    currentTabName = tabName;
     currentPtyCols = cols || 80;
     currentPtyRows = rows || 24;
 
     console.log(`[zellij.attach] PTY spawned, PID: ${pty.pid}`);
 
-    // Stream PTY output to channel
-    pty.onData((data) => {
-      socket.emit('terminal:output', {
-        userId,
-        data,
-      });
+    // Stream PTY output to channel, coalesced into fewer/larger frames so
+    // heavy output doesn't drown the browser terminal in tiny writes. Readiness
+    // is NOT announced here — it's emitted only after waitForZellijReady
+    // confirms zellij's attach actually booted (see below).
+    const outputCoalescer = createOutputCoalescer((data) => {
+      socket.emit('terminal:output', { userId, data });
     });
+    pty.onData((chunk) => outputCoalescer.push(chunk));
 
     // Handle PTY exit
     pty.onExit(({ exitCode, signal }) => {
       console.log(`[zellij.attach] PTY exited: code=${exitCode}, signal=${signal}`);
+      // Emit any buffered tail before the socket tears down.
+      outputCoalescer.dispose();
       ptyProcess = null;
 
       // Notify daemon that terminal ended
@@ -224,6 +438,17 @@ export async function handleZellijAttach(
       process.exit(exitCode || 0);
     });
 
+    // Daemon retires a duplicate executor: disconnect first so pty.onExit can't
+    // relay a spurious terminal:exit to the browser, then exit (no reconnect).
+    socket.on('terminal:shutdown', (data: { userId: string }) => {
+      if (data.userId !== userId) return;
+      graceController?.cancel();
+      feathersClient?.io.disconnect();
+      feathersClient = null;
+      ptyProcess?.kill();
+      process.exit(0);
+    });
+
     // Listen for input from browser via channel
     socket.on('terminal:input', (data: { userId: string; input: string }) => {
       if (data.userId === userId && ptyProcess) {
@@ -231,78 +456,77 @@ export async function handleZellijAttach(
       }
     });
 
-    // Listen for resize events
+    // Same-size resize (browser's reconnect redraw) emits no SIGWINCH — force a repaint.
     socket.on('terminal:resize', (data: { userId: string; cols: number; rows: number }) => {
-      if (data.userId === userId && ptyProcess) {
-        currentPtyCols = data.cols;
-        currentPtyRows = data.rows;
+      if (data.userId !== userId || !ptyProcess) return;
+      const unchanged = data.cols === currentPtyCols && data.rows === currentPtyRows;
+      currentPtyCols = data.cols;
+      currentPtyRows = data.rows;
+      if (unchanged) {
+        forceZellijRepaint(ptyProcess, data.cols, data.rows);
+      } else {
         ptyProcess.resize(data.cols, data.rows);
       }
     });
 
-    // Listen for tab commands (from daemon when user switches branches
-    // OR when a `claude-code-cli` session is created — the daemon passes
-    // `command` + `commandArgs` so the new tab spawns the `claude` binary
-    // directly into its foreground process).
-    socket.on(
-      'terminal:tab',
-      async (data: {
-        action: string;
-        tabName: string;
-        cwd?: string;
-        command?: string;
-        commandArgs?: string[];
-        /** Force-recreate semantics for `create`: closes every existing
-         *  tab named `tabName` before spawning a fresh one. Used by
-         *  /sessions/:id/restart-cli and by the daemon's ensure-create
-         *  path when it detected the in-tab claude was dead. */
-        forceRecreate?: boolean;
-      }) => {
-        try {
-          await handleTabAction(
-            data.action,
-            data.tabName,
-            data.cwd,
-            data.command,
-            data.commandArgs,
-            data.forceRecreate
-          );
-        } catch (err) {
-          // handleTabAction throws on focus/create-without-command
-          // failure; the socket handler must catch it or Node will
-          // treat it as an unhandled rejection and tear down the
-          // executor. We log + drop — the next ensure-create / Restart
-          // re-attempts naturally.
-          console.warn(
-            `[zellij.tab] handleTabAction(${data.action} ${data.tabName}) failed:`,
-            err instanceof Error ? err.message : String(err)
-          );
-        }
-      }
-    );
-
-    // Listen for redraw requests (when client reconnects)
-    // Trigger resize to force Zellij to redraw via SIGWINCH
-    socket.on('terminal:redraw', (data: { userId: string }) => {
-      if (data.userId === userId && ptyProcess) {
-        ptyProcess.resize(currentPtyCols, currentPtyRows);
+    // Listen for tab commands from the daemon when the user switches branches.
+    socket.on('terminal:tab', async (data: { action: string; tabName: string; cwd?: string }) => {
+      try {
+        await handleTabAction(data.action, data.tabName, data.cwd);
+      } catch (err) {
+        // The socket handler must catch failures or Node will treat them as
+        // unhandled rejections and tear down the executor.
+        console.warn(
+          `[zellij.tab] handleTabAction(${data.action} ${data.tabName}) failed:`,
+          err instanceof Error ? err.message : String(err)
+        );
       }
     });
 
-    // Create initial tab if specified. Retried because `zellij attach
-    // --create` boots the session asynchronously — the first
-    // `action new-tab` after a fast attach can race with the server
-    // setup and get back "There is no active session!" before the
-    // session is registered. Without retry + catch, that error
-    // propagates as an unhandled promise rejection and crashes the
-    // executor (Node 22+ behavior).
-    if (tabName) {
-      void (async () => {
-        await new Promise((r) => setTimeout(r, 500));
+    // Listen for redraw requests (when client reconnects)
+    socket.on('terminal:redraw', (data: { userId: string }) => {
+      if (data.userId === userId) forceZellijRepaint(ptyProcess, currentPtyCols, currentPtyRows);
+    });
+
+    // Confirm zellij's attach is actually operational before announcing
+    // readiness and creating the initial tab. `zellij attach --create` boots
+    // the session asynchronously — node-pty returning a PID does NOT mean the
+    // session server is up. We probe with a lightweight `zellij action` until
+    // it succeeds, THEN ack ready, so the daemon's tab choreography never
+    // races an un-booted zellij. If it never comes up, surface terminal:error
+    // instead of a false ready that would leave the browser hanging.
+    void (async () => {
+      const attached = await waitForZellijReady(sessionName);
+      if (!attached) {
+        console.error('[zellij.attach] zellij session did not become ready');
+        if (feathersClient?.io.connected) {
+          feathersClient.io.emit('terminal:error', {
+            userId,
+            message: 'Terminal failed to start: zellij session did not become ready',
+          });
+        }
+        // Tear down instead of lingering as a dead PTY the daemon would adopt
+        // (leaving the browser stuck on "Connecting…" with no recovery). Killing
+        // the PTY fires pty.onExit → terminal:exit → process.exit, so the daemon
+        // evicts its executor map entry and the next open does a clean cold spawn.
+        ptyProcess?.kill();
+        return;
+      }
+      zellijAttached = true;
+      emitTerminalReady(socket, userId);
+
+      // Reattaching to an existing session does not repaint on its own; nudge a
+      // resize so the frame and pane content draw without the user hitting Enter.
+      forceZellijRepaint(ptyProcess, currentPtyCols, currentPtyRows);
+
+      // Create the initial tab now that the session is confirmed up. Keep a
+      // bounded retry as belt-and-suspenders against a residual boot race:
+      // without the catch, a rejection here crashes the executor (Node 22+).
+      if (tabName) {
         for (let attempt = 0; attempt < 5; attempt++) {
           try {
             await handleTabAction('create', tabName, cwd);
-            return;
+            break;
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             if (/no active session/i.test(msg) && attempt < 4) {
@@ -313,24 +537,11 @@ export async function handleZellijAttach(
               continue;
             }
             console.warn('[zellij.attach] Initial new-tab failed (giving up):', msg);
-            return;
+            break;
           }
         }
-      })();
-    }
-
-    // Source env file after Zellij initializes (user env vars like API keys)
-    if (envFile && ptyProcess) {
-      // Wait for shell to be ready, then source env file
-      setTimeout(() => {
-        if (ptyProcess) {
-          // Source the env file silently (suppress output, ignore errors if file doesn't exist)
-          const sourceCmd = `[ -f '${envFile}' ] && source '${envFile}' 2>/dev/null; clear\r`;
-          ptyProcess.write(sourceCmd);
-          console.log(`[zellij.attach] Sourced env file: ${envFile}`);
-        }
-      }, 800); // Wait longer than tab creation to ensure shell is ready
-    }
+      }
+    })();
 
     // Return success - executor stays running until PTY exits
     return {
@@ -345,6 +556,22 @@ export async function handleZellijAttach(
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error('[zellij.attach] Failed:', errorMessage);
+
+    // Surface the attach failure to the browser so it shows an error instead
+    // of hanging on "connecting" forever — the readiness ack never arrives on
+    // this path.
+    if (feathersClient?.io.connected) {
+      feathersClient.io.emit('terminal:error', { userId, message: errorMessage });
+    }
+
+    // Cancel any pending teardown timer so a failed attach doesn't keep the
+    // process pinned alive until the full grace window expires.
+    if (graceController) {
+      graceController.cancel();
+      graceController = null;
+    }
+    bridgeHealthy = false;
+    zellijAttached = false;
 
     // Cleanup on error
     if (ptyProcess) {
@@ -376,7 +603,7 @@ export async function handleZellijTab(
   payload: ZellijTabPayload,
   options: CommandOptions
 ): Promise<ExecutorResult> {
-  const { action, tabName, cwd, command, commandArgs, forceRecreate } = payload.params;
+  const { action, tabName, cwd } = payload.params;
 
   // Dry run mode
   if (options.dryRun) {
@@ -388,8 +615,6 @@ export async function handleZellijTab(
         action,
         tabName,
         cwd,
-        tabCommand: command,
-        tabCommandArgs: commandArgs,
       },
     };
   }
@@ -406,14 +631,13 @@ export async function handleZellijTab(
   }
 
   try {
-    await handleTabAction(action, tabName, cwd, command, commandArgs, forceRecreate);
+    await handleTabAction(action, tabName, cwd);
 
     return {
       success: true,
       data: {
         action,
         tabName,
-        spawnedCommand: command,
       },
     };
   } catch (error) {
@@ -432,6 +656,62 @@ export async function handleZellijTab(
  * Current Zellij session name (set when attach starts)
  */
 let currentSessionName: string | null = null;
+
+/**
+ * Probe whether a zellij session is up and accepting `action` commands.
+ * Runs a quiet `query-tab-names` (stdout/stderr ignored) and reports whether
+ * it exited 0. Used as the readiness signal that zellij attach actually
+ * booted, as opposed to node-pty merely returning a PID.
+ */
+function isZellijSessionUp(sessionName: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const proc = spawn('zellij', ['--session', sessionName, 'action', 'query-tab-names'], {
+      stdio: 'ignore',
+    });
+    const timeout = setTimeout(() => {
+      try {
+        proc.kill();
+      } catch {
+        /* already exited */
+      }
+      resolve(false);
+    }, 3000);
+    proc.on('exit', (code) => {
+      clearTimeout(timeout);
+      resolve(code === 0);
+    });
+    proc.on('error', () => {
+      clearTimeout(timeout);
+      resolve(false);
+    });
+  });
+}
+
+/**
+ * Poll {@link isZellijSessionUp} until it succeeds or the attempt budget is
+ * exhausted. ~20 * 300ms ≈ 6s ceiling, comfortably longer than a normal
+ * zellij boot; on exhaustion the caller surfaces terminal:error rather than a
+ * false readiness ack. Exported for unit testing with an injected probe.
+ */
+export async function waitForZellijReady(
+  sessionName: string,
+  opts: {
+    attempts?: number;
+    delayMs?: number;
+    probe?: (sessionName: string) => Promise<boolean>;
+    sleep?: (ms: number) => Promise<void>;
+  } = {}
+): Promise<boolean> {
+  const attempts = opts.attempts ?? 20;
+  const delayMs = opts.delayMs ?? 300;
+  const probe = opts.probe ?? isZellijSessionUp;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (await probe(sessionName)) return true;
+    if (attempt < attempts - 1) await sleep(delayMs);
+  }
+  return false;
+}
 
 /**
  * Query existing tab names from Zellij session
@@ -483,18 +763,6 @@ async function queryTabNames(): Promise<string[]> {
 }
 
 /**
- * Execute a zellij action command
- *
- * Uses `zellij action` CLI to control the running session.
- * For 'create' action, checks if tab exists first and focuses instead.
- *
- * When `command` is supplied on a `create` action, the new tab spawns
- * the named binary instead of the user's default shell. This is how the
- * Claude Code CLI adapter drops the user into an interactive `claude`
- * REPL inside a Zellij pane — see
- * docs/internal/claude-code-cli-integration-analysis-2026-05-14.md §
- * "Spawn shape".
- */
 /**
  * Run one `zellij --session <X> action <args...>` invocation.
  * Returns exit code + stderr so callers can branch on success/failure
@@ -535,103 +803,12 @@ function runZellij(
   });
 }
 
-/**
- * Close EVERY tab matching `tabName`. Zellij's `close-tab` only closes
- * the currently-focused tab, so for duplicates (which happen when
- * multiple executors race on `new-tab` — see CLAUDE.md's "Cold-start
- * race" notes) we navigate-then-close in a loop.
- *
- * **Critical guard**: count matches upfront and bound the loop by
- * that count. Earlier "loop until go-to-tab-name errors" semantics
- * blew up because `zellij action go-to-tab-name <missing>` does NOT
- * always return non-zero — it can silently no-op, leaving focus on
- * whatever tab was current. The subsequent `close-tab` then kills
- * the WRONG tab, and the loop keeps killing tabs until the session
- * is empty (zellij with no tabs auto-exits — the whole executor
- * dies). We saw this in the wild on the Restart path against a
- * session that had several `cli-XXX` duplicates plus unrelated tabs.
- *
- * Re-query between iterations so concurrent activity (e.g. a
- * sibling executor closing tabs simultaneously) doesn't confuse our
- * count.
- */
-async function closeAllTabsNamed(sessionName: string, tabName: string): Promise<void> {
-  // Cap by initial count so we never close more tabs than existed at
-  // start. Re-checked each iteration in case parallel activity pruned
-  // the list under us.
-  const initialTabs = await queryTabNames();
-  const initialMatches = initialTabs.filter((t) => t === tabName).length;
-  if (initialMatches === 0) {
-    console.log(`[zellij.tab] No tabs to close for "${tabName}" — already gone`);
-    return;
-  }
-  let closed = 0;
-  for (let i = 0; i < initialMatches; i++) {
-    // Verify a matching tab still exists before navigating + closing.
-    // Guards against the "go-to-tab-name silently no-ops on missing
-    // name → close-tab kills the wrong tab" failure mode.
-    const currentTabs = await queryTabNames();
-    if (!currentTabs.includes(tabName)) {
-      break;
-    }
-    const focusResult = await runZellij(sessionName, ['go-to-tab-name', tabName]);
-    if (focusResult.code !== 0) {
-      break;
-    }
-    const closeResult = await runZellij(sessionName, ['close-tab']);
-    if (closeResult.code !== 0) {
-      console.warn(`[zellij.tab] close-tab failed for "${tabName}": ${closeResult.stderr}`);
-      break;
-    }
-    closed += 1;
-  }
-  console.log(`[zellij.tab] Closed ${closed} of ${initialMatches} tab(s) named "${tabName}"`);
-}
-
-/**
- * Run `new-tab` with the per-tab KDL layout file that spawns `command`
- * as the tab's foreground pane. Caller is responsible for ensuring no
- * stale duplicate tab exists when forceRecreate semantics are required.
- */
-async function createTabWithLayout(
-  sessionName: string,
-  tabName: string,
-  cwd: string | undefined,
-  command: string,
-  commandArgs: string[]
-): Promise<{ code: number | null; stderr: string }> {
-  const layoutPath = writeClaudeLayoutFile(tabName, cwd, command, commandArgs);
-  const actionArgs = ['new-tab', '--name', tabName, '--layout', layoutPath];
-  if (cwd) {
-    actionArgs.splice(3, 0, '--cwd', cwd);
-  }
-  return runZellij(sessionName, actionArgs);
-}
-
-async function handleTabAction(
-  action: string,
-  tabName: string,
-  cwd?: string,
-  command?: string,
-  commandArgs?: string[],
-  forceRecreate?: boolean
-): Promise<void> {
+async function handleTabAction(action: string, tabName: string, cwd?: string): Promise<void> {
   if (!currentSessionName) {
     console.error('[zellij.tab] No session name set, cannot perform tab action');
     return;
   }
   const sessionName = currentSessionName;
-
-  // ── close ───────────────────────────────────────────────────────────
-  // Close ALL matching tabs. Idempotent: silent no-op if tab is absent.
-  // Multi-iteration covers the "duplicate tabs from racing executors"
-  // case — the previous single-shot close left siblings behind, and
-  // subsequent `create` would auto-converse to focus the stale sibling
-  // instead of spawning fresh.
-  if (action === 'close') {
-    await closeAllTabsNamed(sessionName, tabName);
-    return;
-  }
 
   // ── focus ───────────────────────────────────────────────────────────
   if (action === 'focus') {
@@ -644,48 +821,25 @@ async function handleTabAction(
     return;
   }
 
-  // ── create (with or without forceRecreate) ──────────────────────────
+  // ── create ──────────────────────────────────────────────────────────
   if (action !== 'create') {
     throw new Error(`Unknown tab action: ${action}`);
   }
 
-  if (forceRecreate) {
-    // Caller (e.g. /sessions/:id/restart-cli, or the ensure-create
-    // path when claude is dead) explicitly wants a fresh tab even if
-    // a stale-named one already exists. Close every matching tab
-    // first, then proceed to new-tab.
-    console.log(`[zellij.tab] forceRecreate=true for "${tabName}" — closing existing first`);
-    await closeAllTabsNamed(sessionName, tabName);
-  } else {
-    // Default: if the tab already exists, treat the create as a
-    // "land on this tab" hint and just focus it. Preserves scrollback
-    // for the common reload case where the tab + its foreground
-    // process are both still healthy.
-    const existingTabs = await queryTabNames();
-    if (existingTabs.includes(tabName)) {
-      console.log(`[zellij.tab] Tab "${tabName}" already exists, focusing instead of creating`);
-      const result = await runZellij(sessionName, ['go-to-tab-name', tabName]);
-      if (result.code !== 0) {
-        console.warn(`[zellij.tab] focus-on-existing failed for "${tabName}": ${result.stderr}`);
-      }
-      return;
-    }
-  }
-
-  // Fresh new-tab. With `command`, Zellij's `action new-tab` doesn't
-  // accept `--command` directly — we materialize a per-tab KDL layout
-  // file declaring one pane that runs it (see writeClaudeLayoutFile).
-  if (command) {
-    const result = await createTabWithLayout(sessionName, tabName, cwd, command, commandArgs ?? []);
+  // If the tab already exists, treat create as a "land on this tab" hint
+  // and focus it so terminal scrollback is preserved across reloads.
+  const existingTabs = await queryTabNames();
+  if (existingTabs.includes(tabName)) {
+    console.log(`[zellij.tab] Tab "${tabName}" already exists, focusing instead of creating`);
+    const result = await runZellij(sessionName, ['go-to-tab-name', tabName]);
     if (result.code !== 0) {
-      throw new Error(`zellij new-tab failed with code ${result.code}: ${result.stderr}`);
+      console.warn(`[zellij.tab] focus-on-existing failed for "${tabName}": ${result.stderr}`);
     }
-    console.log(`[zellij.tab] Tab action succeeded: create ${tabName} (with command)`);
     return;
   }
 
   const actionArgs = ['new-tab', '--name', tabName];
-  if (cwd) actionArgs.push('--cwd', cwd);
+  actionArgs.push('--cwd', cwd || resolveEffectiveUserInfo().homedir);
   const result = await runZellij(sessionName, actionArgs);
   if (result.code !== 0) {
     throw new Error(`zellij new-tab failed with code ${result.code}: ${result.stderr}`);
@@ -694,56 +848,13 @@ async function handleTabAction(
 }
 
 /**
- * Materialize a Zellij KDL layout file describing one pane that runs a
- * specific binary with the given argv. Used by the Claude Code CLI
- * adapter to spawn `claude` into a freshly-created tab.
- *
- * Layout shape (KDL):
- *
- *   layout {
- *     pane command="claude" cwd="..." {
- *       args "--session-id" "..." "-n" "cli-..." "--permission-mode" "acceptEdits" ...
- *     }
- *   }
- *
- * Returns the absolute path of the written file. The file is left on disk
- * after Zellij parses it — Zellij reads it synchronously during the
- * `action new-tab --layout <file>` call, so cleanup is optional. We keep
- * it under `/tmp/agor-zellij-layouts/` for easy diagnosis if a spawn
- * misbehaves.
- */
-function writeClaudeLayoutFile(
-  tabName: string,
-  cwd: string | undefined,
-  command: string,
-  commandArgs: string[]
-): string {
-  const dir = '/tmp/agor-zellij-layouts';
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  }
-  const filePath = path.join(dir, `${tabName}-${Date.now()}.kdl`);
-  // KDL string-escaping: backslashes and double-quotes only. Each argv
-  // element becomes a separate quoted token inside `args`. Named
-  // `quoteKdl` (not `escape`) to avoid shadowing the global
-  // `escape()` URL-encoder.
-  const quoteKdl = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-  const argsLine =
-    commandArgs.length > 0 ? `        args ${commandArgs.map(quoteKdl).join(' ')}\n` : '';
-  const cwdAttr = cwd ? ` cwd=${quoteKdl(cwd)}` : '';
-  const layout = `layout {
-    pane command=${quoteKdl(command)}${cwdAttr} {
-${argsLine}    }
-}
-`;
-  fs.writeFileSync(filePath, layout, { mode: 0o600 });
-  return filePath;
-}
-
-/**
  * Cleanup function - called when executor is shutting down
  */
 export function cleanupZellij(): void {
+  if (graceController) {
+    graceController.cancel();
+    graceController = null;
+  }
   if (ptyProcess) {
     console.log('[zellij] Killing PTY process');
     ptyProcess.kill();
@@ -754,4 +865,7 @@ export function cleanupZellij(): void {
     feathersClient = null;
   }
   currentSessionName = null;
+  currentTabName = undefined;
+  bridgeHealthy = false;
+  zellijAttached = false;
 }

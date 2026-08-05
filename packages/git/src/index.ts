@@ -16,8 +16,6 @@ import {
   buildAuthHeaderEnv,
   buildGitConfigEnv,
   extractRepoName,
-  getBranchesDir,
-  getReposDir,
   gitUrlHasUserinfo,
   parseHostFromGitUrl,
   redactGitUrlCredentials,
@@ -567,7 +565,8 @@ export async function addSafeDirectoryBestEffort(path: string, logPrefix?: strin
 
 export interface CloneOptions {
   url: string;
-  targetDir?: string;
+  /** Caller-resolved destination; this package does not own application filesystem layout. */
+  targetDir: string;
   bare?: boolean;
   /**
    * Pin the working tree to a specific branch instead of the remote's HEAD.
@@ -600,9 +599,6 @@ export {
   buildGitConfigEnv,
   buildGitConfigParameters,
   extractRepoName,
-  getBranchesDir,
-  getBranchPath,
-  getReposDir,
   gitUrlHasUserinfo,
   isLikelyGitToken,
   parseHostFromGitUrl,
@@ -610,9 +606,7 @@ export {
   stripGitUrlCredentials,
 } from './pure';
 
-/**
- * Clone a Git repository to ~/.agor/repos/<name>
- */
+/** Clone a Git repository to the caller-owned, explicitly resolved target directory. */
 export async function cloneRepo(options: CloneOptions): Promise<CloneResult> {
   const cloneUrl = stripGitUrlCredentials(options.url);
   if (cloneUrl !== options.url) {
@@ -622,8 +616,10 @@ export async function cloneRepo(options: CloneOptions): Promise<CloneResult> {
   }
 
   const repoName = extractRepoName(cloneUrl);
-  const reposDir = getReposDir();
-  const targetPath = options.targetDir || join(reposDir, repoName);
+  if (!options.targetDir) {
+    throw new Error('cloneRepo requires an explicitly resolved targetDir');
+  }
+  const targetPath = options.targetDir;
 
   // Auth is delivered exclusively via the `http.<host>.extraheader` env-var
   // path configured by `createGit`. We deliberately do NOT splice the token
@@ -1730,15 +1726,19 @@ export async function getGitState(repoPath: string): Promise<string> {
  * This is typically used when deleting a remote repository that was cloned by Agor.
  *
  * @param repoPath - Absolute path to the repository directory
- * @throws Error if the path is not inside ~/.agor/repos/ (safety check)
+ * @param allowedReposDir - Explicit safety root (tenant-scoped when applicable)
+ * @throws Error if the path is not inside the allowed repositories root
  */
-export async function deleteRepoDirectory(repoPath: string): Promise<void> {
+export async function deleteRepoDirectory(
+  repoPath: string,
+  allowedReposDir: string
+): Promise<void> {
   const { rm } = await import('node:fs/promises');
   const { realpathSync, existsSync } = await import('node:fs');
   const { resolve, relative } = await import('node:path');
 
   // Safety check: ensure we're only deleting from ~/.agor/repos/
-  const reposDir = getReposDir();
+  const reposDir = allowedReposDir;
 
   // Use realpathSync to follow symlinks and canonicalize paths.
   // If the directory was already removed, fall back to resolving via parent.
@@ -1771,15 +1771,19 @@ export async function deleteRepoDirectory(repoPath: string): Promise<void> {
  * Removes the branch directory and all its contents from the branches directory.
  *
  * @param branchPath - Absolute path to the branch directory
+ * @param allowedBranchesDir - Explicit safety root (tenant-scoped when applicable)
  * @throws Error if the path is not inside the configured branches directory (safety check)
  */
-export async function deleteBranchDirectory(branchPath: string): Promise<void> {
+export async function deleteBranchDirectory(
+  branchPath: string,
+  allowedBranchesDir: string
+): Promise<void> {
   const { rm } = await import('node:fs/promises');
   const { realpathSync, existsSync } = await import('node:fs');
   const { resolve, relative } = await import('node:path');
 
   // Safety check: ensure we're only deleting from configured branches directory
-  const branchesDir = getBranchesDir();
+  const branchesDir = allowedBranchesDir;
 
   // Use realpathSync to follow symlinks and canonicalize paths.
   // If the branch directory was already removed (e.g. by `git worktree remove`),

@@ -9,6 +9,7 @@
  * @see context/guides/rbac-and-unix-isolation.md
  */
 
+import type { UnixUserMode } from '@agor/core/config';
 import type {
   BoardRepository,
   BranchRepository,
@@ -27,6 +28,7 @@ import type {
   UUID,
 } from '@agor/core/types';
 import { BRANCH_PERMISSION_LEVELS, hasMinimumRole, ROLES } from '@agor/core/types';
+import { assertUnixUsernameSatisfiesMode } from '@agor/core/unix';
 
 /**
  * Check if a user has the superadmin role (or deprecated 'owner' alias).
@@ -240,6 +242,32 @@ export function resolveBranchPermission(
     return 'all';
   }
   return effectivePermission ?? branch.others_can ?? 'session';
+}
+
+/** Resolve the one prompt-level policy shared by hooks and custom routes. */
+export function resolveSessionPromptAccess(input: {
+  branch: Branch;
+  session: Session;
+  userId: UUID;
+  isOwner: boolean;
+  userRole?: string;
+  allowSuperadmin?: boolean;
+  branchPermission?: BranchPermissionLevel;
+}): { allowed: boolean; effectiveLevel: BranchPermissionLevel } {
+  const effectiveLevel = resolveBranchPermission(
+    input.branch,
+    input.userId,
+    input.isOwner,
+    input.userRole,
+    input.allowSuperadmin,
+    input.branchPermission
+  );
+  return {
+    effectiveLevel,
+    allowed:
+      PERMISSION_RANK[effectiveLevel] >= PERMISSION_RANK.prompt ||
+      (effectiveLevel === 'session' && input.session.created_by === input.userId),
+  };
 }
 
 /**
@@ -1120,10 +1148,14 @@ export async function loadUnixUsernameForUser(
  * {@link loadUnixUsernameForUser} to keep the two paths in sync.
  *
  * @param userRepo - UserRepository instance
+ * @param unixUserMode - When the mode requires per-user unix_username
+ *   (strict/delegated), a creator without one is rejected at create time
+ *   instead of failing later at prompt time.
  */
 export function setSessionUnixUsername(
   // biome-ignore lint/suspicious/noExplicitAny: UserRepository type
-  userRepo: any
+  userRepo: any,
+  unixUserMode?: UnixUserMode
 ) {
   return async (context: HookContext) => {
     // Only for session creation
@@ -1147,6 +1179,9 @@ export function setSessionUnixUsername(
     // Stamp session with creator's current unix_username.
     // IMMUTABLE - even if user's unix_username changes later, session keeps this value.
     data.unix_username = await loadUnixUsernameForUser(userRepo, userId);
+    if (unixUserMode) {
+      assertUnixUsernameSatisfiesMode(data.unix_username, unixUserMode);
+    }
 
     return context;
   };
@@ -1257,23 +1292,16 @@ export async function ensureCanPromptTargetSession(
   // Resolve ownership internally — callers shouldn't need to know this
   const isOwner = await branchRepo.isOwner(branch.branch_id, userId as UUID);
 
-  // Owners can always prompt
-  if (isOwner) {
-    return targetSession;
-  }
+  const { allowed, effectiveLevel } = resolveSessionPromptAccess({
+    branch,
+    session: targetSession,
+    userId: userId as UUID,
+    isOwner,
+    branchPermission: await branchRepo.resolveUserPermission(branch, userId as UUID),
+  });
+  if (allowed) return targetSession;
 
-  const effectiveLevel = await branchRepo.resolveUserPermission(branch, userId as UUID);
-
-  // 'prompt' or 'all' → can prompt any session
-  if (PERMISSION_RANK[effectiveLevel] >= PERMISSION_RANK.prompt) {
-    return targetSession;
-  }
-
-  // 'session' → can only prompt own sessions
   if (effectiveLevel === 'session') {
-    if (targetSession.created_by === userId) {
-      return targetSession;
-    }
     throw new Forbidden(
       `You have 'session' permission — you can only prompt sessions you created. ` +
         `This session was created by another user. ` +
@@ -1354,36 +1382,22 @@ export function ensureCanPromptInSession(options?: { allowSuperadmin?: boolean }
     const userRole = context.params.user.role as string | undefined;
     const allowSuperadmin = options?.allowSuperadmin ?? true;
 
-    // Owners always have full access
-    if (isOwner) {
-      return context;
+    const session = context.params.session;
+    if (!session) {
+      throw new Error('loadSession hook must run before ensureCanPromptInSession');
     }
-
-    const effectiveLevel = resolveBranchPermission(
+    const { allowed, effectiveLevel } = resolveSessionPromptAccess({
       branch,
+      session,
       userId,
       isOwner,
       userRole,
       allowSuperadmin,
-      context.params.branchPermission
-    );
+      branchPermission: context.params.branchPermission,
+    });
+    if (allowed) return context;
 
-    // 'prompt' or 'all' → can prompt any session
-    if (PERMISSION_RANK[effectiveLevel] >= PERMISSION_RANK.prompt) {
-      return context;
-    }
-
-    // 'session' → can only prompt own sessions
     if (effectiveLevel === 'session') {
-      const session = context.params.session;
-      if (!session) {
-        throw new Error('loadSession hook must run before ensureCanPromptInSession');
-      }
-
-      if (session.created_by === userId) {
-        return context;
-      }
-
       throw new Forbidden(
         `You have 'session' permission — you can only prompt sessions you created. ` +
           `This session was created by another user. ` +

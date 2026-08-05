@@ -39,8 +39,12 @@
 
 import {
   assertInlineAgenticConfigurationAllowed,
+  InvalidScheduleAgenticToolConfigError,
+  normalizeScheduleAgenticToolConfig,
   presetConfigurationToScheduleConfig,
+  resolveAgenticConfigurationReference,
   resolveAgenticToolPreset,
+  unixUserModeRequiresUsername,
 } from '@agor/core/config';
 import type { TenantScopeAwareDatabase } from '@agor/core/db';
 import {
@@ -52,16 +56,18 @@ import {
   ScheduleRepository,
   SessionMCPServerRepository,
   SessionRepository,
+  sanitizeDbError,
   shortId,
   UsersRepository,
 } from '@agor/core/db';
 import { Forbidden } from '@agor/core/feathers';
-import { resolvePermissionConfig, resolveSessionDefaults } from '@agor/core/sessions';
+import { resolveSessionDefaults } from '@agor/core/sessions';
 import type {
   Branch,
   MCPServerID,
   PermissionMode,
   Schedule,
+  ScheduleAgenticToolConfig,
   ScheduleID,
   Session,
   SessionID,
@@ -69,7 +75,7 @@ import type {
   User,
   UUID,
 } from '@agor/core/types';
-import { SessionStatus } from '@agor/core/types';
+import { isAgenticToolName, SessionStatus } from '@agor/core/types';
 import type { UnixUserMode } from '@agor/core/unix';
 import {
   getNextRunTime,
@@ -80,6 +86,7 @@ import {
 import Handlebars from 'handlebars';
 import type { Application } from '../declarations';
 import { emitServiceEvent } from '../utils/emit-service-event.js';
+import type { SessionParams } from './sessions.js';
 
 /**
  * Session statuses that count as "actively consuming the branch" for
@@ -155,10 +162,58 @@ export function renderSchedulePrompt(
       },
     };
     return compiledTemplate(context);
-  } catch (error) {
-    console.error(`❌ Failed to render prompt template:`, error);
+  } catch {
+    console.error(`❌ Failed to render prompt template`);
     return template;
   }
+}
+
+/** Resolve a persisted schedule source into session-ready configuration for one run. */
+export async function materializeScheduleAgenticToolConfig(
+  db: TenantScopeAwareDatabase,
+  schedule: Pick<Schedule, 'agentic_tool_config' | 'created_by'>
+): Promise<ScheduleAgenticToolConfig> {
+  const cfg = normalizeScheduleAgenticToolConfig(schedule.agentic_tool_config);
+  return materializeNormalizedScheduleAgenticToolConfig(db, cfg, schedule.created_by);
+}
+
+async function materializeNormalizedScheduleAgenticToolConfig(
+  db: TenantScopeAwareDatabase,
+  cfg: ScheduleAgenticToolConfig,
+  createdBy: UUID
+): Promise<ScheduleAgenticToolConfig> {
+  if (cfg.configuration_reference) {
+    const resolved = await resolveAgenticConfigurationReference(
+      db,
+      cfg.agentic_tool,
+      cfg.configuration_reference,
+      createdBy as import('@agor/core/types').UserID
+    );
+    if (resolved.preset) {
+      return presetConfigurationToScheduleConfig(
+        cfg.agentic_tool,
+        resolved.preset.preset_id,
+        resolved.preset.configuration
+      );
+    }
+    const materialized = presetConfigurationToScheduleConfig(
+      cfg.agentic_tool,
+      cfg.configuration_reference,
+      resolved.configuration ?? {}
+    );
+    const { preset_id: _presetId, ...inline } = materialized;
+    return inline;
+  }
+  if (cfg.preset_id) {
+    const preset = await resolveAgenticToolPreset(db, cfg.agentic_tool, cfg.preset_id);
+    return presetConfigurationToScheduleConfig(
+      cfg.agentic_tool,
+      preset.preset_id,
+      preset.configuration
+    );
+  }
+  await assertInlineAgenticConfigurationAllowed(db, cfg.agentic_tool);
+  return cfg;
 }
 
 /**
@@ -181,8 +236,19 @@ export class ScheduleBusyError extends Error {
  * runnable (disabled, missing entity, etc.).
  */
 export class ScheduleNotReadyError extends Error {
-  public readonly code: 'schedule_disabled' | 'schedule_incomplete';
-  constructor(code: 'schedule_disabled' | 'schedule_incomplete', message: string) {
+  public readonly code:
+    | 'schedule_disabled'
+    | 'schedule_incomplete'
+    | 'schedule_agentic_tool_removed'
+    | 'schedule_invalid_config';
+  constructor(
+    code:
+      | 'schedule_disabled'
+      | 'schedule_incomplete'
+      | 'schedule_agentic_tool_removed'
+      | 'schedule_invalid_config',
+    message: string
+  ) {
     super(message);
     this.name = 'ScheduleNotReadyError';
     this.code = code;
@@ -254,13 +320,13 @@ export class SchedulerService {
 
     // Run first tick immediately
     this.tick().catch((error) => {
-      console.error('❌ Scheduler tick failed:', error);
+      console.error('❌ Scheduler tick failed:', sanitizeDbError(error));
     });
 
     // Schedule recurring ticks
     this.intervalHandle = setInterval(() => {
       this.tick().catch((error) => {
-        console.error('❌ Scheduler tick failed:', error);
+        console.error('❌ Scheduler tick failed:', sanitizeDbError(error));
       });
     }, this.config.tickInterval);
   }
@@ -323,12 +389,15 @@ export class SchedulerService {
             await this.processSchedule(schedule, now);
           });
         } catch (error) {
-          console.error(`❌ Failed to process schedule ${shortId(ref.scheduleId)}:`, error);
+          console.error(
+            `❌ Failed to process schedule ${shortId(ref.scheduleId)}:`,
+            sanitizeDbError(error)
+          );
           // Continue processing other schedules
         }
       }
     } catch (error) {
-      console.error('❌ Scheduler tick failed:', error);
+      console.error('❌ Scheduler tick failed:', sanitizeDbError(error));
       throw error;
     }
   }
@@ -398,7 +467,10 @@ export class SchedulerService {
         await this.withTenantDatabase(() =>
           this.scheduleRepo.update(schedule.schedule_id, { next_run_at: nextRunAt })
         ).catch((err) =>
-          console.error(`Failed to advance next_run_at for ${schedule.schedule_id}:`, err)
+          console.error(
+            `Failed to advance next_run_at for ${schedule.schedule_id}:`,
+            sanitizeDbError(err)
+          )
         );
       }
       if (this.config.debug) {
@@ -506,9 +578,9 @@ export class SchedulerService {
 
     const unixUsername = creator.unix_username || null;
 
-    if (!unixUsername && this.config.unixUserMode === 'strict') {
+    if (!unixUsername && unixUserModeRequiresUsername(this.config.unixUserMode)) {
       console.error(
-        `      ❌ Cannot spawn scheduled session: Creator has no unix_username (strict mode)`,
+        `      ❌ Cannot spawn scheduled session: Creator has no unix_username (${this.config.unixUserMode} mode)`,
         {
           schedule_id: schedule.schedule_id,
           schedule_name: schedule.name,
@@ -518,7 +590,7 @@ export class SchedulerService {
         }
       );
       throw new Error(
-        `Schedule creator ${creator.email} has no unix_username set. Cannot spawn scheduled session in strict Unix user mode.`
+        `Schedule creator ${creator.email} has no unix_username set. Cannot spawn scheduled session in ${this.config.unixUserMode} Unix user mode.`
       );
     }
 
@@ -566,6 +638,22 @@ export class SchedulerService {
   ): Promise<Session | null> {
     const { source, triggeredBy } = options;
     const manual = source === 'manual';
+    let persistedCfg: ScheduleAgenticToolConfig;
+    try {
+      persistedCfg = normalizeScheduleAgenticToolConfig(schedule.agentic_tool_config);
+    } catch (error) {
+      if (!(error instanceof InvalidScheduleAgenticToolConfigError)) throw error;
+      const removedTool = !isAgenticToolName(schedule.agentic_tool_config.agentic_tool);
+      if (!manual) {
+        await this.advanceScheduleCursor(schedule, now);
+      }
+      throw new ScheduleNotReadyError(
+        removedTool ? 'schedule_agentic_tool_removed' : 'schedule_invalid_config',
+        removedTool
+          ? 'This schedule uses the removed experimental Claude Code CLI integration. Choose a supported agentic tool before running it.'
+          : error.message
+      );
+    }
 
     const branch = await this.withTenantDatabase(() =>
       this.branchRepo.findById(schedule.branch_id)
@@ -629,32 +717,23 @@ export class SchedulerService {
       // 5. Resolve unix_username (schedule's creator is the execution identity).
       const { creator, unixUsername } = await this.resolveCreatorUnixUsername(schedule);
 
-      let cfg = schedule.agentic_tool_config;
-      if (cfg.preset_id) {
-        const presetId = cfg.preset_id;
-        // Cron ticks carry tenant identity but no ambient DB scope — open a
-        // short tenant unit of work like the repo calls above.
-        const preset = await this.withTenantDatabase(() =>
-          resolveAgenticToolPreset(this.db, cfg.agentic_tool, presetId)
-        );
-        cfg = presetConfigurationToScheduleConfig(
-          cfg.agentic_tool,
-          cfg.preset_id,
-          preset.configuration
-        );
-      } else {
-        await this.withTenantDatabase(() =>
-          assertInlineAgenticConfigurationAllowed(this.db, cfg.agentic_tool)
-        );
-      }
-      const scheduleModelConfig = cfg.model_config
-        ? resolveSessionDefaults({
-            agenticTool: cfg.agentic_tool,
-            user: creator,
-            overrides: { modelConfig: cfg.model_config },
-            now: new Date(now),
-          }).model_config
-        : undefined;
+      const cfg = await this.withTenantDatabase(() =>
+        materializeNormalizedScheduleAgenticToolConfig(this.db, persistedCfg, schedule.created_by)
+      );
+      const inheritsCreatorDefaults =
+        persistedCfg.configuration_reference === undefined && persistedCfg.preset_id === undefined;
+      const runtimeDefaults = resolveSessionDefaults({
+        agenticTool: cfg.agentic_tool,
+        user: inheritsCreatorDefaults ? creator : null,
+        overrides: {
+          permissionMode: cfg.permission_mode as PermissionMode | undefined,
+          modelConfig: cfg.model_config,
+          codexSandboxMode: cfg.codex_sandbox_mode,
+          codexApprovalPolicy: cfg.codex_approval_policy,
+          codexNetworkAccess: cfg.codex_network_access,
+        },
+        now: new Date(now),
+      });
 
       // 6. Create session with schedule metadata + FK back to schedule.
       const session: Partial<Session> = {
@@ -674,20 +753,11 @@ export class SchedulerService {
           ? `${schedule.name} — manual @ ${new Date(scheduledRunAt).toISOString()}`
           : `${schedule.name} — ${new Date(scheduledRunAt).toISOString()}`,
         contextFiles: cfg.context_files ?? [],
-        permission_config: resolvePermissionConfig({
-          effectiveTool: cfg.agentic_tool,
-          overrides: {
-            permissionMode: cfg.permission_mode as PermissionMode | undefined,
-            codexSandboxMode: cfg.codex_sandbox_mode,
-            codexApprovalPolicy: cfg.codex_approval_policy,
-            codexNetworkAccess: cfg.codex_network_access,
-          },
-          userToolDefaults: creator?.default_agentic_config?.[cfg.agentic_tool],
-        }),
+        permission_config: runtimeDefaults.permission_config,
         // DefaultModelConfig → Session.model_config. If the schedule
         // only sets ancillary fields (e.g. Claude effort), resolve them
         // against the same model defaults used by fresh sessions.
-        model_config: scheduleModelConfig,
+        model_config: runtimeDefaults.model_config,
         custom_context: {
           scheduled_run: {
             rendered_prompt: renderedPrompt,
@@ -710,9 +780,10 @@ export class SchedulerService {
       // catches any concurrent path that raced past the dedup check —
       // we surface that as a normal dedup hit rather than an error.
       const sessionsService = this.app.service('sessions');
+      const sessionCreateParams: SessionParams = { _agenticConfigResolved: true };
       let createdSession: Session;
       try {
-        createdSession = await sessionsService.create(session);
+        createdSession = await sessionsService.create(session, sessionCreateParams);
       } catch (err) {
         if (isUniqueConstraintError(err)) {
           const winner = await this.withTenantDatabase(() =>
@@ -799,7 +870,7 @@ export class SchedulerService {
 
       return createdSession;
     } catch (error) {
-      console.error(`      ❌ Failed to spawn session for ${schedule.name}:`, error);
+      console.error(`      ❌ Failed to spawn scheduled session:`, sanitizeDbError(error));
       throw error;
     }
   }
@@ -826,9 +897,22 @@ export class SchedulerService {
 
       await this.withTenantDatabase(() => this.scheduleRepo.update(schedule.schedule_id, updates));
     } catch (error) {
-      console.error(`      ❌ Failed to update schedule metadata:`, error);
+      console.error(`      ❌ Failed to update schedule metadata:`, sanitizeDbError(error));
       throw error;
     }
+  }
+
+  /**
+   * Advance a rejected cron schedule to its next real fire without pretending
+   * a run occurred. This prevents an enabled historical/corrupt schedule from
+   * being retried on every scheduler tick while preserving it for migration.
+   */
+  private async advanceScheduleCursor(schedule: Schedule, now: number): Promise<void> {
+    const tz = resolveScheduleTz(schedule.timezone_mode, schedule.timezone);
+    const nextRunAt = getNextRunTime(schedule.cron_expression, new Date(now), tz);
+    await this.withTenantDatabase(() =>
+      this.scheduleRepo.update(schedule.schedule_id, { next_run_at: nextRunAt })
+    );
   }
 
   /**
@@ -863,7 +947,7 @@ export class SchedulerService {
         );
       }
     } catch (error) {
-      console.error(`      ❌ Failed to enforce retention policy:`, error);
+      console.error(`      ❌ Failed to enforce retention policy:`, sanitizeDbError(error));
       // Don't throw - retention failure shouldn't block scheduling
     }
   }

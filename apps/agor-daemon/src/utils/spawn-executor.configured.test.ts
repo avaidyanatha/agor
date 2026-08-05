@@ -16,7 +16,11 @@ vi.mock('node:child_process', () => ({
 vi.mock('@agor/core/unix', () => ({
   attachEnvFileCleanup: vi.fn(),
   buildSpawnArgs: vi.fn(),
+  escapeShellArg: (value: string) => `'${value.replace(/'/g, "'\\''")}'`,
   isSecretEnvKey: vi.fn(),
+  // Real implementation (mirrors user-manager.ts) — the {unix_user} format
+  // guard under test depends on its actual charset semantics.
+  isValidUnixUsername: (username: string) => /^[a-z_][a-z0-9_-]{0,31}$/.test(username),
   prepareImpersonationEnv: vi.fn(),
 }));
 
@@ -114,6 +118,35 @@ describe('configured executor spawning', () => {
     );
   });
 
+  it('forwards a delegated read identity through a configured command template', async () => {
+    const proc = createMockProcess();
+    spawnMock.mockReturnValue(proc);
+    const { runExecutorCommand } = await import('./spawn-executor');
+    const promise = runExecutorCommand(
+      { command: 'branch.files.browse' },
+      {
+        executorCommandTemplate: 'launch --user {unix_user} -- {command}',
+        asUser: 'alice',
+      }
+    );
+
+    proc.stdout.emit(
+      'data',
+      Buffer.from('AGOR_EXECUTOR_RESULT {"success":true,"data":{"files":[]}}\n')
+    );
+    proc.emit('exit', 0);
+
+    await expect(promise).resolves.toEqual({
+      success: true,
+      data: { files: [] },
+    });
+    expect(spawnMock).toHaveBeenCalledWith(
+      'sh',
+      ['-c', 'launch --user alice -- branch.files.browse'],
+      expect.objectContaining({ stdio: ['pipe', 'pipe', 'pipe'] })
+    );
+  });
+
   it('calls onExit for templated spawns', async () => {
     const proc = createMockProcess();
     spawnMock.mockReturnValue(proc);
@@ -125,7 +158,7 @@ describe('configured executor spawning', () => {
 
     proc.emit('exit', 17);
 
-    expect(onExit).toHaveBeenCalledWith(17);
+    expect(onExit).toHaveBeenCalledWith(17, { mode: 'templated' });
   });
 
   it('keeps createConfiguredSpawner isolated from module-level defaults', async () => {
@@ -171,6 +204,170 @@ describe('configured executor spawning', () => {
         env: expect.objectContaining({ LOG_LEVEL: 'warn' }),
       })
     );
+  });
+
+  it('substitutes a shell-safe {tenant_id} from the ambient tenant context', async () => {
+    const proc = createMockProcess();
+    spawnMock.mockReturnValue(proc);
+    const { runWithTenantContext } = await import('@agor/core/db');
+    const { spawnExecutor } = await import('./spawn-executor');
+
+    runWithTenantContext("tenant-'abc", () =>
+      spawnExecutor(
+        { command: 'git.clone' },
+        {
+          executorCommandTemplate: 'launch --tenant-id {tenant_id} -- {command}',
+        }
+      )
+    );
+
+    expect(spawnMock).toHaveBeenCalledWith(
+      'sh',
+      ['-c', "launch --tenant-id 'tenant-'\\''abc' -- git.clone"],
+      expect.objectContaining({ stdio: ['pipe', 'pipe', 'pipe'] })
+    );
+  });
+
+  it('refuses a tenant-dependent template without ambient tenant context', async () => {
+    const { spawnExecutor } = await import('./spawn-executor');
+
+    expect(() =>
+      spawnExecutor(
+        { command: 'git.clone' },
+        { executorCommandTemplate: 'launch --tenant-id {tenant_id} -- {command}' }
+      )
+    ).toThrow(
+      'executor_command_template requires {tenant_id}, but no active tenant context is available'
+    );
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('does not let caller template overrides replace the ambient tenant', async () => {
+    const proc = createMockProcess();
+    spawnMock.mockReturnValue(proc);
+    const { runWithTenantContext } = await import('@agor/core/db');
+    const { spawnExecutor } = await import('./spawn-executor');
+
+    runWithTenantContext('trusted-tenant', () =>
+      spawnExecutor(
+        { command: 'git.clone' },
+        {
+          executorCommandTemplate: 'launch --tenant-id {tenant_id} -- {command}',
+          templateVariables: { tenant_id: 'spoofed-tenant' } as never,
+        }
+      )
+    );
+
+    expect(spawnMock).toHaveBeenCalledWith(
+      'sh',
+      ['-c', "launch --tenant-id 'trusted-tenant' -- git.clone"],
+      expect.objectContaining({ stdio: ['pipe', 'pipe', 'pipe'] })
+    );
+  });
+
+  it('uses ambient tenant context for short-lived templated commands', async () => {
+    const proc = createMockProcess();
+    spawnMock.mockReturnValue(proc);
+    const { runWithTenantContext } = await import('@agor/core/db');
+    const { runExecutorCommand } = await import('./spawn-executor');
+
+    const resultPromise = runWithTenantContext('tenant-run', () =>
+      runExecutorCommand(
+        { command: 'git.repo.inspect' },
+        {
+          executorCommandTemplate: 'launch --tenant-id {tenant_id} -- {command}',
+        }
+      )
+    );
+    proc.stdout.emit('data', Buffer.from('{"success":true,"data":{"ok":true}}\n'));
+    proc.emit('exit', 0);
+
+    await expect(resultPromise).resolves.toMatchObject({
+      success: true,
+      data: { ok: true },
+    });
+    expect(spawnMock).toHaveBeenCalledWith(
+      'sh',
+      ['-c', "launch --tenant-id 'tenant-run' -- git.repo.inspect"],
+      expect.objectContaining({ stdio: ['pipe', 'pipe', 'pipe'] })
+    );
+  });
+
+  it.each([
+    ['local', undefined],
+    ['configured-template', 'launch {command}'],
+  ])('suppresses sensitive stdout and stderr for %s commands', async (_name, template) => {
+    const proc = createMockProcess();
+    spawnMock.mockReturnValue(proc);
+    const { runExecutorCommand } = await import('./spawn-executor');
+    const promise = runExecutorCommand(
+      { command: 'codex.auth-file' },
+      {
+        ...(template ? { executorCommandTemplate: template } : {}),
+        sensitiveOutput: true,
+      }
+    );
+    const secret = 'credential-material-must-not-be-logged';
+    proc.stdout.emit(
+      'data',
+      Buffer.from(JSON.stringify({ success: true, data: { content: secret } }))
+    );
+    proc.stderr.emit('data', Buffer.from(secret));
+    proc.emit('exit', 0);
+    await expect(promise).resolves.toMatchObject({ success: true });
+    expect(vi.mocked(console.log).mock.calls.flat().join(' ')).not.toContain(secret);
+    expect(vi.mocked(console.error).mock.calls.flat().join(' ')).not.toContain(secret);
+  });
+
+  it('launches a local executor from its operator-owned package directory, not payload cwd', async () => {
+    const proc = createMockProcess();
+    spawnMock.mockReturnValue(proc);
+    const { spawnExecutor } = await import('./spawn-executor');
+    const tenantBranchPath = '/tenant-a/worktrees/repo/feature';
+
+    spawnExecutor({ command: 'prompt', params: { cwd: tenantBranchPath } });
+
+    expect(spawnMock).toHaveBeenCalledOnce();
+    const spawnOptions = spawnMock.mock.calls[0]?.[2] as { cwd?: string };
+    expect(spawnOptions.cwd).toBeTruthy();
+    expect(spawnOptions.cwd).not.toBe(tenantBranchPath);
+    expect(spawnOptions.cwd).toMatch(/\/packages\/executor$/);
+    expect(JSON.parse(proc.written)).toMatchObject({ params: { cwd: tenantBranchPath } });
+  });
+
+  it('preserves the exit-0/no-result protocol failure diagnostic', async () => {
+    const proc = createMockProcess();
+    spawnMock.mockReturnValue(proc);
+    const { runExecutorCommand } = await import('./spawn-executor');
+    const promise = runExecutorCommand(
+      { command: 'branch.files.browse' },
+      { executorCommandTemplate: 'launch --user {unix_user} -- {command}' }
+    );
+
+    proc.emit('exit', 0);
+
+    await expect(promise).resolves.toEqual({
+      success: false,
+      error: {
+        code: 'EXECUTOR_RESULT_MISSING',
+        message: 'Executor exited with code 0 but did not emit a JSON result',
+        details: {
+          command: 'branch.files.browse',
+          exitCode: 0,
+          stderr: '',
+        },
+      },
+    });
+  });
+
+  it('refuses every unscoped executor launch when tenant context is required', async () => {
+    const { configureExecutor, spawnExecutor } = await import('./spawn-executor');
+    configureExecutor(null, { requireTenantContext: true });
+
+    expect(() => spawnExecutor({ command: 'prompt' })).toThrow(
+      'Missing active tenant context for executor launch'
+    );
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 
   it('propagates an explicit LOG_LEVEL to local executor processes at startup', async () => {
@@ -264,5 +461,56 @@ describe('configured executor spawning', () => {
         process.env.AGOR_EXECUTOR_PATH = previous;
       }
     }
+  });
+});
+
+describe('substituteTemplateVariables', () => {
+  it('substitutes a {tenant_id} placeholder with the provided tenant', async () => {
+    const { substituteTemplateVariables } = await import('./spawn-executor');
+
+    const result = substituteTemplateVariables('launch --tenant-id {tenant_id} -- {command}', {
+      tenant_id: 'tenant-xyz',
+      command: 'git.clone',
+    });
+
+    expect(result).toBe("launch --tenant-id 'tenant-xyz' -- git.clone");
+  });
+
+  it('throws when {tenant_id} is required but no tenant is provided', async () => {
+    const { substituteTemplateVariables } = await import('./spawn-executor');
+
+    expect(() =>
+      substituteTemplateVariables('launch --tenant-id {tenant_id} -- {command}', {
+        command: 'git.clone',
+      })
+    ).toThrow(
+      'executor_command_template requires {tenant_id}, but no active tenant context is available'
+    );
+  });
+
+  it('substitutes a valid {unix_user} value', async () => {
+    const { substituteTemplateVariables } = await import('./spawn-executor');
+
+    const result = substituteTemplateVariables('launch --user {unix_user}', {
+      unix_user: 'agor_alice',
+    });
+
+    expect(result).toBe('launch --user agor_alice');
+  });
+
+  it.each([
+    { name: 'shell metacharacters', value: 'alice; rm -rf /' },
+    { name: 'path traversal', value: '../other-tenant' },
+    { name: 'command substitution', value: '$(whoami)' },
+    { name: 'uppercase (outside the Unix username charset)', value: 'Alice' },
+  ])('refuses a malformed {unix_user} value: $name', async ({ value }) => {
+    const { substituteTemplateVariables } = await import('./spawn-executor');
+
+    // The template runs via `sh -c` and launchers use {unix_user} as a path
+    // segment for per-user home mounts, so format validation (not escaping)
+    // is the control — it must reject both shell and path-traversal shapes.
+    expect(() =>
+      substituteTemplateVariables('launch --user {unix_user}', { unix_user: value })
+    ).toThrow('{unix_user} value is not a valid Unix username');
   });
 });

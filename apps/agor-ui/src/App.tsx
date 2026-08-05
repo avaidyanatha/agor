@@ -10,7 +10,8 @@ import type {
   CreateMCPServerInput,
   CreateRepoRequest,
   CreateUserInput,
-  GatewayChannel,
+  GatewayChannelCreateData,
+  GatewayChannelPatchData,
   PermissionMode,
   Repo,
   Session,
@@ -27,7 +28,7 @@ import {
   ROLES,
   sessionPath,
 } from '@agor-live/client';
-import { Alert, App as AntApp, ConfigProvider, theme } from 'antd';
+import { Alert, ConfigProvider, theme } from 'antd';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BrowserRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { AVAILABLE_AGENTS } from './components/AgentSelectionGrid';
@@ -40,6 +41,7 @@ import { LoginPage } from './components/LoginPage';
 import { OnboardingBanners } from './components/OnboardingBanners';
 import { OnboardingWizard } from './components/OnboardingWizard';
 import { buildPromptWithAttachments } from './components/SessionPanel/composerAttachments';
+import { StreamdownPortalApp } from './components/StreamdownPortalApp';
 import { getDaemonUrl } from './config/daemon';
 import { CanvasNavigationProvider } from './contexts/CanvasNavigationContext';
 import { ConnectionProvider } from './contexts/ConnectionContext';
@@ -57,6 +59,7 @@ import {
 import { useEnsureFrameworkRepo } from './hooks/useEnsureFrameworkRepo';
 import { findFrameworkRepo } from './hooks/useFrameworkRepo';
 import { useSurfaceBranding } from './hooks/useSurfaceBranding';
+import { sessionCreated } from './store/agorRealtimeActions';
 import { agorStore, useAgorStore } from './store/agorStore';
 import { SharedUserSettingsModal } from './surfaces/SharedUserSettingsModal';
 import type { RouteSurfaceId } from './surfaces/surfaceRegistry';
@@ -873,6 +876,11 @@ function AppContent() {
             ? authConfig.externalLaunch.loginRedirectUrl
             : undefined
         }
+        externalLaunchReturnHostParam={
+          authConfig?.externalLaunch?.enabled
+            ? authConfig.externalLaunch.returnHostParam
+            : undefined
+        }
       />
     );
   }
@@ -962,6 +970,14 @@ function AppContent() {
       });
 
       if (session) {
+        // Optimistically insert the authoritative row `create` just returned so
+        // the store knows the session before we navigate to it. Selection is
+        // routed through URL→store resolution, which can only resolve a session
+        // that's already in `sessionById`; without this the drawer would blank
+        // until the socket `created` event re-delivered the same object. That
+        // event is now a harmless no-op — `sessionCreated` is idempotent.
+        sessionCreated(session);
+
         // Associate MCP servers if provided
         if (config.mcpServerIds && config.mcpServerIds.length > 0) {
           for (const serverId of config.mcpServerIds) {
@@ -997,7 +1013,7 @@ function AppContent() {
             });
             const finalPrompt = buildPromptWithAttachments(
               config.initialPrompt ?? '',
-              uploaded.files.map((file) => file.path)
+              uploaded.files
             );
             if (finalPrompt.trim()) {
               await handleSendPrompt(session.session_id, finalPrompt, config.permissionMode);
@@ -1576,7 +1592,7 @@ function AppContent() {
   };
 
   // Handle gateway channel CRUD
-  const handleCreateGatewayChannel = async (data: Partial<GatewayChannel>) => {
+  const handleCreateGatewayChannel = async (data: GatewayChannelCreateData) => {
     if (!client) return;
     try {
       await client.service('gateway-channels').create(data);
@@ -1590,7 +1606,7 @@ function AppContent() {
 
   const handleUpdateGatewayChannel = async (
     channelId: string,
-    updates: Partial<GatewayChannel>
+    updates: GatewayChannelPatchData
   ) => {
     if (!client) return;
     try {
@@ -1859,6 +1875,7 @@ function AppContent() {
       instanceDescription={instanceConfig?.description}
       webTerminalEnabled={featuresConfig?.webTerminal === true}
       branchStorageConfig={featuresConfig?.branchStorage}
+      uploadPolicy={featuresConfig?.uploadPolicy}
       onRestartOnboarding={handleRestartOnboarding}
     />
   );
@@ -1989,7 +2006,7 @@ function AppWrapper() {
 
   return (
     <ConfigProvider theme={getCurrentThemeConfig()}>
-      <AntApp>
+      <StreamdownPortalApp>
         <ErrorBoundary variant="global">
           {/* CanvasNavigationProvider lives outside the agor `App` body so
               hooks called in that body (useUrlState, useAppNavigation) can
@@ -2009,7 +2026,7 @@ function AppWrapper() {
             )}
           </CanvasNavigationProvider>
         </ErrorBoundary>
-      </AntApp>
+      </StreamdownPortalApp>
     </ConfigProvider>
   );
 }

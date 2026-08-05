@@ -7,7 +7,8 @@
 
 import { execSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
-import { shortId, validateDirectory } from '@agor/core';
+import { shortId } from '@agor/core/db';
+import { validateDirectory } from '@agor/core/lib/validation';
 import { Claude } from '@agor/core/sdk';
 import { renderAgorSystemPrompt } from '@agor/core/templates/session-context';
 import { mergeMCPRemoteHeaders } from '@agor/core/tools/mcp/http-headers';
@@ -490,7 +491,7 @@ export async function setupQuery(
 
         // Clear SDK session ID to force fresh start with new MCP config
         if (deps.sessionsRepo) {
-          await deps.sessionsRepo.update(sessionId, { sdk_session_id: undefined });
+          await deps.sessionsRepo.update(sessionId, { sdk_session_id: null });
           // Update in-memory session object to match database
           session.sdk_session_id = undefined;
         }
@@ -512,7 +513,7 @@ export async function setupQuery(
 
           // Clear stale session ID to prevent exit code 1
           if (deps.sessionsRepo) {
-            await deps.sessionsRepo.update(sessionId, { sdk_session_id: undefined });
+            await deps.sessionsRepo.update(sessionId, { sdk_session_id: null });
           }
           // Don't set queryOptions.resume - start fresh
         } else {

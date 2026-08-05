@@ -125,7 +125,7 @@ export default class SessionLoadClaude extends BaseCommand {
       this.log(`${chalk.green('✓')} Created branch: ${chalk.cyan(branchName)}`);
 
       // Create Agor session
-      const agorSession: Partial<Session> & { session_id: SessionID; created_by: string } = {
+      const agorSession = {
         session_id: generateId() as SessionID,
         agentic_tool: 'claude-code',
         status: TaskStatus.COMPLETED,
@@ -134,16 +134,11 @@ export default class SessionLoadClaude extends BaseCommand {
         last_updated: new Date().toISOString(),
         created_by: 'cli-import',
         branch_id: branch.branch_id,
-        git_state: {
-          ref: 'unknown',
-          base_sha: '',
-          current_sha: '',
-        },
         genealogy: {
           children: [],
         },
         tasks: [],
-      };
+      } satisfies Partial<Session> & { session_id: SessionID; created_by: string };
 
       // Create session in daemon
       const sessionsService = client.service('sessions');

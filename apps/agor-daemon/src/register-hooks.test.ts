@@ -18,15 +18,22 @@
  * branch-authorization.test.ts), so here we only verify the classifier.
  */
 
+import { type HookContext, TaskStatus } from '@agor/core/types';
 import { describe, expect, it } from 'vitest';
+
 import {
   enrichSessionFindResultWithRemoteRelationships,
   getTrustedSessionTenantId,
   isPromptFlowPatchOnly,
   PROMPT_FLOW_PATCH_FIELDS,
+  protectExternalTaskCreate,
+  protectServerManagedTaskWrites,
+  type RegisterHooksContext,
+  registerHooks,
   shouldDrainQueueAfterSessionPostTurnPatch,
   shouldRunSessionPostTurnHooks,
   shouldValidateRepoEnvironmentPayload,
+  TENANT_IDENTITY_ONLY_SERVICE_PATHS,
   TENANT_OWNED_SERVICE_PATHS,
 } from './register-hooks';
 import { canReceiveMcpTokenForSession } from './utils/mcp-token-authorization';
@@ -42,13 +49,260 @@ const makeSession = (sessionId: string): import('@agor/core/types').Session =>
     tasks: [],
     genealogy: { children: [] },
     contextFiles: [],
-    git_state: { ref: 'main', base_sha: 'abc', current_sha: 'abc' },
     scheduled_from_branch: false,
     ready_for_prompt: false,
     archived: false,
   }) as import('@agor/core/types').Session;
 
+describe('protectExternalTaskCreate', () => {
+  const context = (data: unknown, provider: string | null = 'rest') =>
+    ({ data, params: { provider } }) as import('@agor/core/types').HookContext;
+
+  it('preserves the documented dormant create/run contract', () => {
+    const hook = context({ session_id: 'session-1', full_prompt: 'hello' });
+    expect(protectExternalTaskCreate(hook)).toBe(hook);
+    expect(hook.data).toEqual({
+      session_id: 'session-1',
+      full_prompt: 'hello',
+      status: TaskStatus.CREATED,
+    });
+  });
+
+  it.each(['running', 'queued', 'completed'])('rejects externally forged status %s', (status) => {
+    expect(() =>
+      protectExternalTaskCreate(context({ session_id: 'session-1', full_prompt: 'hello', status }))
+    ).toThrow('must use status created');
+  });
+
+  it('rejects lifecycle and identity fields outside the create contract', () => {
+    expect(() =>
+      protectExternalTaskCreate(
+        context({ session_id: 'session-1', full_prompt: 'hello', created_by: 'forged' })
+      )
+    ).toThrow('not client-managed');
+  });
+
+  it('leaves trusted internal task creation unchanged', () => {
+    const hook = context({ status: TaskStatus.RUNNING }, null);
+    expect(protectExternalTaskCreate(hook)).toBe(hook);
+    expect(hook.data).toEqual({ status: TaskStatus.RUNNING });
+  });
+});
+
+describe('protectServerManagedTaskWrites', () => {
+  const executorPayload = {
+    type: 'executor-session',
+    purpose: 'executor-task',
+    session_id: 'session-1',
+    task_id: 'task-1',
+    branch_id: 'branch-1',
+  };
+  const externalContext = (
+    method: 'patch',
+    data: unknown,
+    options: {
+      taskId?: string;
+      executorTaskId?: string;
+    } = {}
+  ): import('@agor/core/types').HookContext =>
+    ({
+      path: 'tasks',
+      method,
+      id: options.taskId,
+      data,
+      params: {
+        provider: 'rest',
+        ...(options.executorTaskId
+          ? {
+              authentication: {
+                payload: { ...executorPayload, task_id: options.executorTaskId },
+              },
+            }
+          : {}),
+      },
+    }) as import('@agor/core/types').HookContext;
+
+  it('rejects every normal-user patch, including terminality', async () => {
+    await expect(
+      protectServerManagedTaskWrites(
+        externalContext('patch', { status: TaskStatus.COMPLETED }, { taskId: 'task-1' })
+      )
+    ).rejects.toThrow('executor token scoped to this task');
+  });
+
+  it('rejects an executor token scoped to another task', async () => {
+    await expect(
+      protectServerManagedTaskWrites(
+        externalContext(
+          'patch',
+          { status: TaskStatus.COMPLETED },
+          { taskId: 'task-1', executorTaskId: 'task-2' }
+        )
+      )
+    ).rejects.toThrow('executor token scoped to this task');
+  });
+
+  it.each(['task_id', 'session_id', 'created_by', 'queue_position', 'sdk_failure'])(
+    'rejects executor patch field %s outside the result allowlist',
+    async (field) => {
+      await expect(
+        protectServerManagedTaskWrites(
+          externalContext(
+            'patch',
+            { [field]: 'forged' },
+            {
+              taskId: 'task-1',
+              executorTaskId: 'task-1',
+            }
+          )
+        )
+      ).rejects.toThrow('not executor-managed');
+    }
+  );
+
+  it('allows a task-scoped executor to publish bounded result fields', async () => {
+    await expect(
+      protectServerManagedTaskWrites(
+        externalContext(
+          'patch',
+          {
+            status: TaskStatus.COMPLETED,
+            completed_at: '2026-07-10T20:00:00.000Z',
+            model: 'test-model',
+            git_state: { sha_at_end: 'abc' },
+          },
+          {
+            taskId: 'task-1',
+            executorTaskId: 'task-1',
+          }
+        )
+      )
+    ).resolves.toBeDefined();
+  });
+
+  it.each([TaskStatus.AWAITING_PERMISSION, TaskStatus.AWAITING_INPUT])(
+    'allows a scoped executor to request resume from %s',
+    async () => {
+      const context = externalContext(
+        'patch',
+        { status: TaskStatus.RUNNING },
+        {
+          taskId: 'task-1',
+          executorTaskId: 'task-1',
+        }
+      );
+
+      await expect(protectServerManagedTaskWrites(context)).resolves.toBe(context);
+    }
+  );
+
+  it('preserves trusted internal direct-to-running task writes', async () => {
+    const context = externalContext('patch', {
+      status: TaskStatus.RUNNING,
+    });
+    context.params.provider = undefined;
+
+    await expect(protectServerManagedTaskWrites(context)).resolves.toBe(context);
+  });
+
+  it('preserves trusted internal dispatching task writes', async () => {
+    const context = externalContext('patch', {
+      status: TaskStatus.DISPATCHING,
+    });
+    context.params.provider = undefined;
+
+    await expect(protectServerManagedTaskWrites(context)).resolves.toBe(context);
+  });
+});
+
 describe('tenant-owned service registration', () => {
+  type RegisteredHook = (context: HookContext) => HookContext | Promise<HookContext>;
+  type RegisteredHooks = {
+    before?: Partial<Record<'all' | 'create', RegisteredHook[]>>;
+  };
+
+  const captureScheduleRegistrations = (): RegisteredHooks[] => {
+    const registrations: RegisteredHooks[] = [];
+    const app = {
+      service(path: string) {
+        return {
+          hooks(hooks: RegisteredHooks) {
+            if (path.replace(/^\//, '') === 'schedules') registrations.push(hooks);
+          },
+        };
+      },
+      use() {},
+      publish() {},
+    };
+
+    registerHooks({
+      db: {} as RegisterHooksContext['db'],
+      app: app as RegisterHooksContext['app'],
+      config: {
+        database: { dialect: 'postgresql' },
+        multi_tenancy: { mode: 'static', static_tenant_id: 'registration-test' },
+      } as RegisterHooksContext['config'],
+      jwtSecret: 'registration-test-secret',
+      branchRbacEnabled: false,
+      requireAuth: async (context) => context,
+      superadminOpts: { allowSuperadmin: true },
+      sessionsService: {} as RegisterHooksContext['sessionsService'],
+      messagesService: {} as RegisterHooksContext['messagesService'],
+      boardsService: undefined,
+      branchRepository: {} as RegisterHooksContext['branchRepository'],
+      usersRepository: {} as RegisterHooksContext['usersRepository'],
+      sessionsRepository: {} as RegisterHooksContext['sessionsRepository'],
+    });
+
+    return registrations;
+  };
+
+  const runRegisteredScheduleCreateBeforeHooks = async (
+    registrations: RegisteredHooks[]
+  ): Promise<HookContext> => {
+    const context = {
+      path: 'schedules',
+      method: 'create',
+      data: {
+        branch_id: '00000000-0000-7000-8000-000000000001',
+        name: 'Nightly',
+        cron_expression: '0 0 * * *',
+        timezone_mode: 'utc',
+        prompt: 'Run',
+        agentic_tool_config: { agentic_tool: 'codex' },
+      },
+      params: {
+        provider: 'rest',
+        user: { user_id: 'registration-test-user', role: 'member' },
+      },
+    } as HookContext;
+
+    for (const registration of registrations) {
+      for (const hook of registration.before?.all ?? []) {
+        await hook(context);
+      }
+    }
+
+    for (const registration of registrations) {
+      for (const hook of registration.before?.create ?? []) {
+        await hook(context);
+      }
+    }
+
+    return context;
+  };
+
+  it('keeps schedule create DTOs valid through the registered tenant hook', async () => {
+    const context = await runRegisteredScheduleCreateBeforeHooks(captureScheduleRegistrations());
+
+    expect(context.params.tenant?.tenant_id).toBe('registration-test');
+    expect(context.data).toMatchObject({
+      created_by: 'registration-test-user',
+      next_run_at: expect.any(Number),
+    });
+    expect(context.data).not.toHaveProperty('tenant_id');
+  });
+
   it('wraps gateway inbound routing in tenant database scope', () => {
     expect(TENANT_OWNED_SERVICE_PATHS).toContain('gateway');
   });
@@ -72,6 +326,12 @@ describe('tenant-owned service registration', () => {
         'mcp-servers/oauth-status',
         'mcp-servers/test-oauth',
       ])
+    );
+  });
+
+  it('wraps Knowledge policy and indexing admin services in tenant database scope', () => {
+    expect(TENANT_OWNED_SERVICE_PATHS).toEqual(
+      expect.arrayContaining(['kb/settings', 'kb/indexing/status', 'kb/indexing/reindex'])
     );
   });
 });
@@ -212,11 +472,12 @@ describe('enrichSessionFindResultWithRemoteRelationships', () => {
 
 describe('isPromptFlowPatchOnly', () => {
   describe('accepts whitelisted-only patches', () => {
-    it.each(
-      PROMPT_FLOW_PATCH_FIELDS.map((f) => [f])
-    )('accepts single whitelisted field: %s', (field) => {
-      expect(isPromptFlowPatchOnly({ [field]: 'any-value' })).toBe(true);
-    });
+    it.each(PROMPT_FLOW_PATCH_FIELDS.map((f) => [f]))(
+      'accepts single whitelisted field: %s',
+      (field) => {
+        expect(isPromptFlowPatchOnly({ [field]: 'any-value' })).toBe(true);
+      }
+    );
 
     it('accepts the prompt-route task-append shape', () => {
       // register-routes.ts: /sessions/:id/prompt appends task_id to session.tasks
@@ -232,13 +493,6 @@ describe('isPromptFlowPatchOnly', () => {
       // register-routes.ts: /sessions/:id/stop sets status + ready_for_prompt
       // (ready_for_prompt: true so the post-patch hook drains any QUEUED tasks)
       expect(isPromptFlowPatchOnly({ status: 'idle', ready_for_prompt: true })).toBe(true);
-    });
-
-    it('accepts the executor git-SHA capture shape', () => {
-      // packages/executor/src/handlers/sdk/base-executor.ts patches current SHA
-      expect(isPromptFlowPatchOnly({ git_state: { current_sha: 'deadbeef', ref: 'main' } })).toBe(
-        true
-      );
     });
 
     it('accepts the executor opencode init shape', () => {
@@ -360,5 +614,27 @@ describe('canReceiveMcpTokenForSession', () => {
         callerRole: 'member',
       })
     ).toBe(false);
+  });
+});
+
+describe('TENANT_IDENTITY_ONLY_SERVICE_PATHS', () => {
+  // Regression: the codex-auth endpoints do network/process work after a short
+  // tenant DB read, then call getCurrentTenantId() to open their own units of
+  // work — so they must carry ambient tenant identity via the identity-only
+  // around hook. codex-auth/logout was missing here, so `Remove login` ran with
+  // no active tenant scope and threw "Missing active tenant context for Codex
+  // auth logout" — the delete-only logout never worked end-to-end.
+  it.each(['codex-auth/device', 'codex-auth/import', 'codex-auth/logout'])(
+    'grants ambient tenant identity to %s',
+    (path) => {
+      expect(TENANT_IDENTITY_ONLY_SERVICE_PATHS).toContain(path);
+    }
+  );
+
+  it('keeps the codex-auth endpoints grouped together', () => {
+    const codexPaths = TENANT_IDENTITY_ONLY_SERVICE_PATHS.filter((path) =>
+      path.startsWith('codex-auth/')
+    );
+    expect(codexPaths).toEqual(['codex-auth/device', 'codex-auth/import', 'codex-auth/logout']);
   });
 });

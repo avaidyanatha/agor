@@ -5,7 +5,12 @@
  * messaging platforms (Slack, Discord, etc.) and Agor sessions.
  */
 
-import type { AgenticToolName, CodexApprovalPolicy, CodexSandboxMode } from './agentic-tool';
+import type {
+  AgenticToolName,
+  CodexApprovalPolicy,
+  CodexSandboxMode,
+  PersistedAgenticToolName,
+} from './agentic-tool';
 import type { BranchID, SessionID, TaskID, UserID, UUID } from './id';
 import type { ScheduleID } from './schedule';
 import type { PermissionMode } from './session';
@@ -29,7 +34,14 @@ export type GatewayOutboundMessageID = UUID;
 // ============================================================================
 
 /** Supported messaging platform types */
-export type ChannelType = 'slack' | 'discord' | 'whatsapp' | 'telegram' | 'github' | 'teams';
+export type ChannelType =
+  | 'slack'
+  | 'discord'
+  | 'whatsapp'
+  | 'telegram'
+  | 'github'
+  | 'teams'
+  | 'shortcut';
 
 /** Thread lifecycle status */
 export type ThreadStatus = 'active' | 'archived' | 'paused';
@@ -42,6 +54,7 @@ export const GATEWAY_SENSITIVE_CONFIG_FIELDS = [
   'private_key',
   'webhook_secret',
   'app_password',
+  'api_token',
 ] as const;
 
 /** Sentinel value used by gateway APIs/tools to represent a redacted secret. */
@@ -81,6 +94,10 @@ export function getRequiredSecretFields(
       return ['private_key'];
     case 'teams':
       return ['app_password'];
+    case 'shortcut':
+      // Shortcut is poll-based over the REST API — the API token is always
+      // required for an enabled channel (there is no outbound-only mode).
+      return ['api_token'];
     default:
       return [];
   }
@@ -164,12 +181,11 @@ export function resolveSlackAgentTools(raw: unknown): Record<SlackAgentToolCapab
 /**
  * A single capability that a connection probe could not establish.
  *
- * `capability` names the thing that failed (e.g. `bot_token`, `app_token`,
- * `channel_access`). `needed`/`provided` carry Slack's verbatim
- * `missing_scope` detail when present so the UI can tell the operator exactly
- * which OAuth scope to add rather than a generic "permission denied".
+ * `capability` names the thing that failed (e.g. `api_token`, `bot_token`, or
+ * `channel_access`). The optional Slack fields preserve verbatim
+ * `missing_scope` detail when that connector can provide it.
  */
-export interface SlackTestFailure {
+export interface GatewayConnectionTestFailure {
   capability: string;
   reason: string;
   slackError?: string;
@@ -178,22 +194,27 @@ export interface SlackTestFailure {
 }
 
 /**
- * Result of a best-effort Slack connection probe.
+ * Result of a best-effort gateway connector connection probe.
  *
- * The probe exercises real Slack API calls (bot token auth, app-token Socket
- * Mode handshake, sampled channel access) but cannot prove everything about a
- * working installation — `notVerifiable` enumerates what green does NOT
- * guarantee so the result is never read as "fully verified".
+ * Probes exercise real platform calls but cannot prove everything about a
+ * working installation. `notVerifiable` enumerates what green does NOT
+ * guarantee; connector-specific optional fields carry richer details.
  */
-export interface SlackTestResult {
+export interface GatewayConnectionTestResult {
   ok: boolean;
   team?: { id: string; name: string };
   bot?: { userId: string; name: string };
   appTokenValid?: boolean;
   channelAccess?: { channelId: string; ok: boolean }[];
-  failures: SlackTestFailure[];
+  failures: GatewayConnectionTestFailure[];
   notVerifiable: string[];
 }
+
+/** @deprecated Use {@link GatewayConnectionTestFailure}. */
+export type SlackTestFailure = GatewayConnectionTestFailure;
+
+/** @deprecated Use {@link GatewayConnectionTestResult}. */
+export type SlackTestResult = GatewayConnectionTestResult;
 
 /**
  * Identity of the Slack app behind a channel's bot token, resolved server-side
@@ -251,6 +272,11 @@ export interface GatewayAgenticConfig {
   envVars?: GatewayEnvVar[];
 }
 
+/** Storage-facing gateway configuration, including readable removed identifiers. */
+export type PersistedGatewayAgenticConfig = Omit<GatewayAgenticConfig, 'agent'> & {
+  agent: PersistedAgenticToolName;
+};
+
 // ============================================================================
 // Core Interfaces
 // ============================================================================
@@ -271,7 +297,7 @@ export interface GatewayChannel {
   agor_user_id: UserID;
   channel_key: string; // UUID — the auth secret for inbound webhooks
   config: Record<string, unknown>; // Platform credentials (encrypted at rest)
-  agentic_config: GatewayAgenticConfig | null; // Session creation settings
+  agentic_config: PersistedGatewayAgenticConfig | null; // Session creation settings
   /** MCP servers attached independently of the agentic-tool configuration. */
   mcp_server_ids?: string[];
   enabled: boolean;
@@ -279,6 +305,47 @@ export interface GatewayChannel {
   updated_at: string; // ISO 8601
   last_message_at: string | null;
 }
+
+/**
+ * Public create DTO.
+ *
+ * Runtime-owned identity, audit, secret, and activity fields are deliberately
+ * omitted, and persisted legacy tools remain read-only. The minimum channel
+ * definition is required instead of relying on repository placeholder values.
+ */
+export interface GatewayChannelCreateData {
+  name: string;
+  channel_type: ChannelType;
+  target_branch_id: BranchID;
+  agor_user_id?: UserID;
+  config: Record<string, unknown>;
+  agentic_config?: GatewayAgenticConfig | null;
+  mcp_server_ids?: string[];
+  enabled?: boolean;
+}
+
+/** Public partial-update DTO. PUT-style replacement is intentionally unsupported. */
+export type GatewayChannelPatchData = Partial<GatewayChannelCreateData>;
+
+type ExhaustiveWriteFields<T, Fields extends readonly (keyof T)[]> =
+  Exclude<keyof T, Fields[number]> extends never ? Fields : never;
+
+const GATEWAY_CHANNEL_WRITE_FIELD_VALUES = [
+  'name',
+  'channel_type',
+  'target_branch_id',
+  'agor_user_id',
+  'config',
+  'agentic_config',
+  'mcp_server_ids',
+  'enabled',
+] as const;
+
+/** Canonical, compile-time-exhaustive allowlist for gateway creates and patches. */
+export const GATEWAY_CHANNEL_WRITE_FIELDS: ExhaustiveWriteFields<
+  GatewayChannelCreateData & GatewayChannelPatchData,
+  typeof GATEWAY_CHANNEL_WRITE_FIELD_VALUES
+> = GATEWAY_CHANNEL_WRITE_FIELD_VALUES;
 
 /**
  * Thread-Session Mapping - Links a platform thread to an Agor session

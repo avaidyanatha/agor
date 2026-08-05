@@ -10,11 +10,13 @@ import path from 'node:path';
 import type { AgorConfig } from '@agor/core/config';
 import {
   getAgorHome,
+  resolveDispatchConnectTimeoutMs,
   resolveExecutorHeartbeatConfig,
   resolveMultiTenancyConfig,
 } from '@agor/core/config';
 import {
   MessagesRepository,
+  runWithTenantContext,
   runWithTenantDatabaseScope,
   SessionRepository,
   shortId,
@@ -23,6 +25,7 @@ import {
 import type { Id, Paginated, Session, SessionID, Task, TenantContext } from '@agor/core/types';
 import { isTerminalTaskStatus, SessionStatus, TaskStatus } from '@agor/core/types';
 import type { Application, SessionsServiceImpl, TasksServiceImpl } from './declarations.js';
+import { containAllTrackedExecutors } from './executor-tracking.js';
 import { ExecutorHeartbeatSupervisor } from './services/executor-heartbeat-supervisor.js';
 import type { GatewayService } from './services/gateway.js';
 import { HealthMonitor } from './services/health-monitor.js';
@@ -31,6 +34,11 @@ import { SchedulerService } from './services/scheduler.js';
 import type { TerminalsService } from './services/terminals.js';
 import { appendSystemMessage } from './utils/append-system-message.js';
 import { scrubManagedGitRemoteCredentials } from './utils/git-remote-credential-scan.js';
+import {
+  generateScopedServiceToken,
+  getDaemonUrl,
+  runExecutorCommand,
+} from './utils/spawn-executor.js';
 
 const DEBUG_STARTUP =
   process.env.AGOR_DEBUG_STARTUP === '1' || process.env.DEBUG?.includes('startup');
@@ -143,6 +151,19 @@ interface OrphanCleanupResult {
   sessionsResetFromOrphanedTasks: number;
 }
 
+async function collectAllPages<T>(
+  fetchPage: (skip: number) => Promise<T[] | Paginated<T>>
+): Promise<T[]> {
+  const rows: T[] = [];
+  while (true) {
+    const result = await fetchPage(rows.length);
+    const page = Array.isArray(result) ? result : result.data;
+    rows.push(...page);
+    const total = Array.isArray(result) ? rows.length : result.total;
+    if (page.length === 0 || rows.length >= total) return rows;
+  }
+}
+
 export async function cleanupOrphanStatuses(ctx: StartupContext): Promise<OrphanCleanupResult> {
   return runStartupTenantDatabaseScope(ctx, () => cleanupOrphanStatusesInTenantScope(ctx));
 }
@@ -164,17 +185,28 @@ async function cleanupOrphanStatusesInTenantScope(
   // Determine restart type before touching anything — sentinel is consumed here
   const wasGraceful = await readAndClearSentinel();
 
-  // Find all orphaned executor-owned tasks (running, stopping, awaiting_permission, awaiting_input)
+  // Find all orphaned executor-owned tasks (dispatching, running, stopping, awaiting_permission, awaiting_input)
   const orphanedTasks = await tasksService.getOrphaned(startupParams as never);
 
   if (orphanedTasks.length > 0) {
     for (const task of orphanedTasks) {
-      await tasksService.patch(
-        task.task_id,
+      const session = await sessionsService.get(task.session_id, startupParams as never);
+      await tasksService.settleTermination(
         {
-          status: TaskStatus.STOPPED,
+          taskId: task.task_id,
+          outcome: 'restart_unverified',
+          sdkFailure: task.sdk_failure
+            ? { ...task.sdk_failure, termination: 'unverified' }
+            : {
+                reason: 'termination_unverified',
+                detected_at: new Date().toISOString(),
+                tool: session.agentic_tool,
+                last_pulse: task.latest_executor_pulse,
+                termination: 'unverified',
+              },
+          errorMessage: 'Daemon restart released this Task without verifying executor termination.',
         },
-        startupParams as never
+        { ...startupParams, suppressTerminalQueueProcessing: true } as never
       );
       startupDebug(
         `[startup] stopped orphaned task ${shortId(task.task_id)} (was: ${task.status})`
@@ -186,11 +218,13 @@ async function cleanupOrphanStatusesInTenantScope(
   // which invalidates the ordering premise of anything waiting behind them — a queued prompt
   // typically depends on whatever was running first. Wiping here prevents the session after-patch
   // hook (triggered below) from draining queued tasks that should be discarded.
-  const queuedResult = (await tasksService.find({
-    query: { status: TaskStatus.QUEUED, $limit: 1000 },
-    ...startupParams,
-  })) as unknown as Paginated<Task>;
-  const queuedTasks = queuedResult.data;
+  const queuedTasks = await collectAllPages<Task>(
+    (skip) =>
+      tasksService.find({
+        query: { status: TaskStatus.QUEUED, $limit: 1000, $skip: skip },
+        ...startupParams,
+      }) as Promise<Task[] | Paginated<Task>>
+  );
 
   if (queuedTasks.length > 0) {
     for (const task of queuedTasks) {
@@ -213,11 +247,15 @@ async function cleanupOrphanStatusesInTenantScope(
     SessionStatus.AWAITING_INPUT,
     SessionStatus.TIMED_OUT,
   ]) {
-    const result = (await sessionsService.find({
-      query: { status, $limit: 1000 },
-      ...startupParams,
-    })) as unknown as Paginated<Session>;
-    orphanedSessions.push(...result.data);
+    orphanedSessions.push(
+      ...(await collectAllPages<Session>(
+        (skip) =>
+          sessionsService.find({
+            query: { status, $limit: 1000, $skip: skip },
+            ...startupParams,
+          }) as Promise<Session[] | Paginated<Session>>
+      ))
+    );
   }
 
   if (orphanedSessions.length > 0) {
@@ -286,13 +324,16 @@ async function cleanupOrphanStatusesInTenantScope(
     ...queuedTasks.map((t: Task) => t.task_id as string),
   ]);
 
-  const idleNotReadyResult = (await sessionsService.find({
-    query: { status: SessionStatus.IDLE, ready_for_prompt: false, $limit: 1000 },
-    ...startupParams,
-  })) as unknown as Paginated<Session>;
+  const idleNotReadySessions = await collectAllPages<Session>(
+    (skip) =>
+      sessionsService.find({
+        query: { status: SessionStatus.IDLE, ready_for_prompt: false, $limit: 1000, $skip: skip },
+        ...startupParams,
+      }) as Promise<Session[] | Paginated<Session>>
+  );
 
   const stuckIdleSessions: Session[] = [];
-  for (const session of idleNotReadyResult.data) {
+  for (const session of idleNotReadySessions) {
     // Sessions maintain an ordered task-ID list; the last entry is the most
     // recent task (same convention as injectRestartNotices below).
     const latestTaskId = session.tasks?.at(-1);
@@ -564,7 +605,7 @@ export async function startup(ctx: StartupContext): Promise<void> {
     `🚀 Agor daemon running at http://${displayHost}:${DAEMON_PORT} (bound to ${DAEMON_HOST})`
   );
   console.log(
-    `   health=/health auth=required services=/sessions,/tasks,/messages,/boards,/repos,/mcp-servers,/context,/users`
+    `   health=/health auth=required services=/sessions,/tasks,/messages,/boards,/repos,/mcp-servers,/users`
   );
 
   runPostStartJob('health-monitor-initialize', () => healthMonitor.initialize());
@@ -577,7 +618,28 @@ export async function startup(ctx: StartupContext): Promise<void> {
   // deliberately skips registered local repos to avoid surprising writes
   // outside Agor-managed storage.
   runPostStartJob('git-remote-credential-scrub', () =>
-    runStartupTenantDatabaseScope(ctx, () => scrubManagedGitRemoteCredentials(db))
+    runStartupTenantDatabaseScope(ctx, async () => {
+      await scrubManagedGitRemoteCredentials(db);
+      if (resolveMultiTenancyConfig(config).mode === 'required_from_auth') {
+        // A later Cell/storage-admin reconciler must scrub physical configs:
+        // one global executor cannot assume every tenant checkout is mounted.
+        return;
+      }
+      const result = await runExecutorCommand(
+        {
+          command: 'git.managed-credentials.reconcile',
+          sessionToken: generateScopedServiceToken(
+            app as unknown as { settings: { authentication?: { secret?: string } } }
+          ),
+          daemonUrl: getDaemonUrl(),
+          params: {},
+        },
+        { logPrefix: '[startup.git-credential-reconcile]' }
+      );
+      if (!result.success) {
+        throw new Error(result.error?.message ?? 'Managed Git credential reconciliation failed');
+      }
+    })
   );
 
   // Log the host IP that will be frozen into env command templates as
@@ -593,9 +655,15 @@ export async function startup(ctx: StartupContext): Promise<void> {
   // `allow_web_terminal` defaults to true, so the check treats undefined as enabled.
   if (config.execution?.allow_web_terminal !== false) {
     const unixMode = config.execution?.unix_user_mode ?? 'simple';
-    if (unixMode === 'simple') {
+    // Delegated mode does not impersonate either: without an executor command
+    // template routing terminals elsewhere, a local terminal still runs as the
+    // daemon user, so the same warning applies.
+    const terminalRunsAsDaemon =
+      unixMode === 'simple' ||
+      (unixMode === 'delegated' && !config.execution?.executor_command_template);
+    if (terminalRunsAsDaemon) {
       console.warn(
-        '\x1b[33m⚠️  SECURITY: allow_web_terminal is enabled (default) with unix_user_mode=simple.\x1b[0m\n' +
+        `\x1b[33m⚠️  SECURITY: allow_web_terminal is enabled (default) with unix_user_mode=${unixMode}.\x1b[0m\n` +
           '   Any member-role user can open a shell running as the daemon user, with read\n' +
           '   access to ~/.agor/config.yaml, agor.db, and the JWT secret.\n' +
           "   Recommended: set execution.unix_user_mode to 'insulated' or 'strict' to\n" +
@@ -609,7 +677,11 @@ export async function startup(ctx: StartupContext): Promise<void> {
 
   // 5. Start executor heartbeat stale supervisor
   const heartbeatConfig = resolveExecutorHeartbeatConfig(config.execution);
-  const heartbeatSupervisor = new ExecutorHeartbeatSupervisor({ app, config: heartbeatConfig });
+  const heartbeatSupervisor = new ExecutorHeartbeatSupervisor({
+    app,
+    config: heartbeatConfig,
+    dispatchConnectTimeoutMs: resolveDispatchConnectTimeoutMs(config.execution),
+  });
   heartbeatSupervisor.start();
   if (heartbeatConfig.enabled) {
     console.log(
@@ -647,16 +719,19 @@ export async function startup(ctx: StartupContext): Promise<void> {
   app.set('knowledgeEmbeddingIndexer', knowledgeEmbeddingIndexer);
   console.log('🧠 Knowledge embedding indexer started');
 
-  // 8. Initialize gateway: refresh channel state cache, then start Socket Mode listeners
+  // 8. Initialize gateway listeners. Static mode preserves the historical
+  // tenant. Auth-resolved mode performs narrow global ID discovery, then
+  // reloads and starts each channel under its immutable tenant identity.
   const gatewayService = safeService('gateway') as unknown as GatewayService | undefined;
   if (gatewayService) {
-    runStartupTenantDatabaseScope(ctx, () => gatewayService.refreshChannelState())
-      .then(() => {
-        return runStartupTenantDatabaseScope(ctx, () => gatewayService.startListeners());
-      })
-      .catch((error: unknown) => {
-        console.error('[gateway] Failed to start listeners:', error);
-      });
+    const multiTenancy = resolveMultiTenancyConfig(config);
+    const startGateway =
+      multiTenancy.mode === 'static'
+        ? runWithTenantContext(multiTenancy.static_tenant_id, () => gatewayService.startListeners())
+        : gatewayService.startListenersAcrossTenants();
+    void startGateway.catch((error: unknown) => {
+      console.error('[gateway] Failed to start listeners:', error);
+    });
   }
 
   // 8. Graceful shutdown handler
@@ -674,6 +749,8 @@ export async function startup(ctx: StartupContext): Promise<void> {
 
       // Stop heartbeat supervisor
       heartbeatSupervisor.stop();
+
+      await containAllTrackedExecutors();
 
       // Clean up terminal sessions
       if (terminalsService) {

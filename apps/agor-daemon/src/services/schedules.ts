@@ -15,25 +15,40 @@
  */
 
 import {
+  AgenticConfigurationResolutionError,
   assertInlineAgenticConfigurationAllowed,
+  InvalidScheduleAgenticToolConfigError,
+  normalizeScheduleAgenticToolConfig,
   PAGINATION,
-  presetConfigurationToScheduleConfig,
   resolveAgenticConfigurationReference,
   resolveAgenticToolPreset,
 } from '@agor/core/config';
 import { ScheduleRepository, type TenantScopeAwareDatabase } from '@agor/core/db';
 import { BadRequest } from '@agor/core/feathers';
-import type { AuthenticatedParams, BranchID, QueryParams, Schedule, UUID } from '@agor/core/types';
+import type {
+  AuthenticatedParams,
+  BranchID,
+  PersistedScheduleAgenticToolConfig,
+  QueryParams,
+  Schedule,
+  ScheduleAgenticToolConfig,
+  ScheduleCreateData,
+  SchedulePatchData,
+  UserID,
+  UUID,
+} from '@agor/core/types';
+import { SCHEDULE_CREATE_WRITE_FIELDS, SCHEDULE_PATCH_WRITE_FIELDS } from '@agor/core/types';
 import { DrizzleService } from '../adapters/drizzle';
+import { assertServiceWriteFields, pickWriteFields } from '../utils/write-data-boundary.js';
 
 export type ScheduleParams = QueryParams<{
   branch_id?: BranchID;
   enabled?: boolean;
   created_by?: UUID;
 }> &
-  AuthenticatedParams;
+  AuthenticatedParams & { schedule?: Schedule };
 
-export class SchedulesService extends DrizzleService<Schedule, Partial<Schedule>, ScheduleParams> {
+export class SchedulesService extends DrizzleService<Schedule, SchedulePatchData, ScheduleParams> {
   private db: TenantScopeAwareDatabase;
 
   constructor(db: TenantScopeAwareDatabase) {
@@ -49,73 +64,112 @@ export class SchedulesService extends DrizzleService<Schedule, Partial<Schedule>
     this.db = db;
   }
 
-  private async validateConfig(config: Schedule['agentic_tool_config']): Promise<void> {
-    if (config.preset_id) {
-      await resolveAgenticToolPreset(this.db, config.agentic_tool, config.preset_id);
-      const hasOverrides = Object.entries(config).some(
-        ([key, value]) => !['agentic_tool', 'preset_id'].includes(key) && value !== undefined
-      );
-      if (hasOverrides) {
-        throw new BadRequest('Preset-backed schedules cannot contain inline overrides');
+  private async validateConfig(
+    config: ScheduleAgenticToolConfig,
+    userId?: UserID
+  ): Promise<ScheduleAgenticToolConfig> {
+    try {
+      if (config.configuration_reference !== undefined) {
+        await resolveAgenticConfigurationReference(
+          this.db,
+          config.agentic_tool,
+          config.configuration_reference,
+          userId
+        );
+        return config;
+      } else if (config.preset_id !== undefined) {
+        const preset = await resolveAgenticToolPreset(
+          this.db,
+          config.agentic_tool,
+          config.preset_id
+        );
+        return { ...config, preset_id: preset.preset_id };
+      } else {
+        await assertInlineAgenticConfigurationAllowed(this.db, config.agentic_tool);
+        return config;
       }
-    } else {
-      await assertInlineAgenticConfigurationAllowed(this.db, config.agentic_tool);
+    } catch (error) {
+      if (error instanceof AgenticConfigurationResolutionError) {
+        throw new BadRequest('Selected agentic configuration is not available');
+      }
+      throw error;
     }
   }
 
-  private async normalizeConfig(
-    config: Schedule['agentic_tool_config'],
-    params?: ScheduleParams
-  ): Promise<Schedule['agentic_tool_config']> {
-    if (!config.preset_id) return config;
-    const resolved = await resolveAgenticConfigurationReference(
-      this.db,
-      config.agentic_tool,
-      config.preset_id,
-      params?.user?.user_id as import('@agor/core/types').UserID | undefined
-    );
-    const configuration = resolved.preset?.configuration ?? resolved.configuration ?? {};
-    if (resolved.preset) {
-      return {
-        agentic_tool: config.agentic_tool,
-        preset_id: resolved.preset.preset_id,
-      };
+  private normalizeConfig(config: PersistedScheduleAgenticToolConfig): ScheduleAgenticToolConfig {
+    try {
+      return normalizeScheduleAgenticToolConfig(config);
+    } catch (error) {
+      if (error instanceof InvalidScheduleAgenticToolConfigError) {
+        throw new BadRequest(error.message);
+      }
+      throw error;
     }
-    const normalized = presetConfigurationToScheduleConfig(
-      config.agentic_tool,
-      config.preset_id,
-      configuration
-    );
-    const { preset_id: _presetId, ...inline } = normalized;
-    return inline;
   }
 
-  async create(data: Partial<Schedule>, params?: ScheduleParams) {
+  async create(data: ScheduleCreateData, params?: ScheduleParams) {
+    const rawData = data as unknown as Record<string, unknown>;
+    const prepared = assertServiceWriteFields(
+      'Schedule',
+      rawData,
+      SCHEDULE_CREATE_WRITE_FIELDS,
+      params,
+      ['created_by', 'next_run_at']
+    );
+    data = pickWriteFields<ScheduleCreateData>(rawData, SCHEDULE_CREATE_WRITE_FIELDS);
+
+    const creatorId = params?.user?.user_id as UserID | undefined;
     if (data.agentic_tool_config) {
-      await this.validateConfig(data.agentic_tool_config);
-      const agenticToolConfig = await this.normalizeConfig(data.agentic_tool_config, params);
+      let agenticToolConfig = this.normalizeConfig(data.agentic_tool_config);
+      agenticToolConfig = await this.validateConfig(agenticToolConfig, creatorId);
       data = {
         ...data,
         agentic_tool_config: agenticToolConfig,
       };
     }
-    return super.create(data, params);
+    const trustedCreatedBy =
+      creatorId ?? (prepared ? (rawData.created_by as UserID | undefined) : undefined);
+    const trustedData = {
+      ...data,
+      ...(trustedCreatedBy ? { created_by: trustedCreatedBy } : {}),
+      ...(prepared && typeof rawData.next_run_at === 'number'
+        ? { next_run_at: rawData.next_run_at }
+        : {}),
+    };
+    return super.create(trustedData, params);
   }
 
-  async patch(id: string | null, data: Partial<Schedule>, params?: ScheduleParams) {
+  async patch(id: string | null, data: SchedulePatchData, params?: ScheduleParams) {
+    const rawData = data as Record<string, unknown>;
+    const prepared = assertServiceWriteFields(
+      'Schedule',
+      rawData,
+      SCHEDULE_PATCH_WRITE_FIELDS,
+      params,
+      ['next_run_at']
+    );
+    data = pickWriteFields<SchedulePatchData>(rawData, SCHEDULE_PATCH_WRITE_FIELDS);
+
     if (data.agentic_tool_config) {
-      await this.validateConfig(data.agentic_tool_config);
-      const agenticToolConfig = await this.normalizeConfig(data.agentic_tool_config, params);
+      if (id === null) throw new BadRequest('Schedule configuration cannot be multi-patched');
+      const current = params?.schedule ?? (await this.get(id, params));
+      let agenticToolConfig = this.normalizeConfig(data.agentic_tool_config);
+      agenticToolConfig = await this.validateConfig(
+        agenticToolConfig,
+        current.created_by as UserID
+      );
       data = {
         ...data,
         agentic_tool_config: agenticToolConfig,
       };
     }
-    return super.patch(id, data, params);
-  }
-
-  async update(id: string, data: Partial<Schedule>, params?: ScheduleParams) {
-    return this.patch(id, data, params) as Promise<Schedule>;
+    const trustedData = {
+      ...data,
+      ...(prepared && typeof rawData.next_run_at === 'number'
+        ? { next_run_at: rawData.next_run_at }
+        : {}),
+    };
+    return super.patch(id, trustedData, params);
   }
 }
 

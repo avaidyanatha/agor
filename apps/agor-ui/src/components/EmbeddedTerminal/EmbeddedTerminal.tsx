@@ -1,27 +1,17 @@
 // biome-ignore-all lint/plugin/noHardcodedColorLiteral: xterm requires an exact ANSI terminal palette
 // biome-ignore-all lint/plugin/noHardcodedColorProperty: xterm requires compound terminal overlay colors
 /**
- * EmbeddedTerminal — an xterm.js terminal rendered INLINE inside a session
- * pane (not in a modal), bound to the user's existing Zellij terminal
- * channel.
- *
- * Used by the Claude Code CLI adapter so the conversation pane can host the
- * live `claude` REPL directly, fulfilling the analysis doc's "Terminal view"
- * (and, when shown alongside the conversation message feed, the spec's
- * developer-affordance split view).
+ * EmbeddedTerminal — an xterm.js terminal rendered inline, bound to the
+ * user's existing Zellij terminal channel.
  *
  * Architecture:
  *   - Calls `terminals.create({ branchId })` to ensure the user's Zellij
  *     executor exists (idempotent — returns existing connection if running).
  *   - Joins the `user/<id>/terminal` channel and renders the live PTY stream.
- *   - If `focusTabName` is provided, emits a `terminal:tab` { action: 'focus' }
- *     so the embedded view lands on the correct CLI session tab.
+ *   - If `focusTabName` is provided, asks the daemon to focus that tab.
  *
- * Mirroring with the popout modal: since both views connect to the SAME
- * channel, opening both at once mirrors output across them — this is the
- * spec's "split view" for debugging. Input from either flows to the same
- * Zellij session, which is the desired behavior (typing somewhere in the
- * conversation hits the same `claude` process the modal sees).
+ * Since embedded and popout views connect to the same channel, opening both
+ * mirrors output and sends input to the same Zellij session.
  *
  * This is a minimal extraction from TerminalModal — the modal-specific
  * concerns (close-confirm, role-gating UI) are kept in TerminalModal.tsx;
@@ -30,9 +20,12 @@
 
 import type { AgorClient, UserID } from '@agor-live/client';
 import { ClipboardAddon } from '@xterm/addon-clipboard';
+import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Terminal } from '@xterm/xterm';
+import { Badge } from 'antd';
 import { useEffect, useRef, useState } from 'react';
+import { loadWebglRenderer } from '../../utils/xtermWebgl';
 import '@xterm/xterm/css/xterm.css';
 
 export interface EmbeddedTerminalProps {
@@ -42,20 +35,8 @@ export interface EmbeddedTerminalProps {
    *  Zellij session gets the right cwd / env. */
   branchId?: string;
   /** When provided, the embedded view emits a Zellij `focus` on this tab name
-   *  once connected. Use the CLI session's `cli-<short>` tab name. */
+   *  once connected. */
   focusTabName?: string;
-  /**
-   * For `claude-code-cli` sessions: pass the Agor session id here. The
-   * server looks up `cli_state` + `model_config`, builds the safe
-   * `claude --session-id <X> ...` argv, and emits a create-with-command
-   * `terminal:tab` event — guaranteeing the cli-XXX tab exists with
-   * `claude` running inside even on first-run / cold-start. Without
-   * this, the cold-start path emits a `focus` for a tab that may not
-   * yet exist (because `onCliSessionCreated`'s dispatch raced an
-   * absent executor) and the user sees a bash prompt instead of the
-   * REPL. Browser never sees raw argv — the daemon builds it server-side.
-   */
-  ensureCliSessionId?: string;
   /** Fixed pixel height. Default 480. Ignored when `fill` is true. */
   height?: number;
   /** When true, the terminal flexes to fill its parent's available
@@ -82,7 +63,6 @@ export const EmbeddedTerminal: React.FC<EmbeddedTerminalProps> = ({
   userId,
   branchId,
   focusTabName,
-  ensureCliSessionId,
   height = 480,
   fill = false,
   visible = true,
@@ -91,6 +71,7 @@ export const EmbeddedTerminal: React.FC<EmbeddedTerminalProps> = ({
   const terminalRef = useRef<Terminal | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
 
   useEffect(() => {
     if (!client || !userId || !containerRef.current) return;
@@ -110,17 +91,23 @@ export const EmbeddedTerminal: React.FC<EmbeddedTerminalProps> = ({
         setConnected(false);
       }
     };
+    // Readiness is the authoritative connected signal: the executor confirmed
+    // its PTY is spawned and attached. Flipping on this (not on the
+    // terminals.create resolution) avoids the "connected but silently dead"
+    // state after a reconnect or a post-spawn executor crash.
+    const handleReady = (payload: { userId: string }) => {
+      if (payload.userId !== userId) return;
+      setConnected(true);
+      setReconnecting(false);
+      setError(null);
+    };
+    const handleReadyError = (payload: { userId: string; message?: string }) => {
+      if (payload.userId !== userId) return;
+      setError(payload.message || 'Terminal failed to start');
+      setConnected(false);
+      setReconnecting(false);
+    };
 
-    // xterm's internal DOM doesn't flex with the container — its
-    // measurement is `cols × cellWidth` pixels, fixed at construction.
-    // Without @xterm/addon-fit (which we don't have as a dep yet) we
-    // implement fit manually: start with conservative bootstrap dims, let
-    // xterm render once so it publishes real per-cell pixel sizes via
-    // `_core._renderService.dimensions.css.cell`, then fit to the
-    // parent's clientWidth/clientHeight. Re-fit on every container size
-    // change via ResizeObserver. The xterm element itself is forced to
-    // fill its container via the inline-style block below, so font/zoom
-    // changes also trip the ResizeObserver and re-fit cleanly.
     const terminal = new Terminal({
       allowProposedApi: true,
       fontSize: 13,
@@ -143,65 +130,30 @@ export const EmbeddedTerminal: React.FC<EmbeddedTerminalProps> = ({
         window.open(uri, '_blank', 'noopener,noreferrer');
       })
     );
+    // GPU renderer first (falls back to DOM if WebGL is unavailable), then
+    // the fit addon derives cols/rows from the container size.
+    loadWebglRenderer(terminal);
+    const fitAddon = new FitAddon();
+    terminal.loadAddon(fitAddon);
     terminalRef.current = terminal;
 
-    // Force the xterm root + viewport to fill the container, so the
-    // .xterm element grows when the pane grows. xterm's stylesheet
-    // defaults to a fixed pixel size; we override here.
-    const xtermEl = containerRef.current.querySelector('.xterm') as HTMLElement | null;
-    if (xtermEl) {
-      xtermEl.style.width = '100%';
-      xtermEl.style.height = '100%';
-    }
-
+    // @xterm/addon-fit measures the container and resizes the terminal to
+    // match; the `onResize` handler below relays the new dims to the PTY.
     const fitToContainer = () => {
-      if (!terminalRef.current || !containerRef.current) return;
-      // biome-ignore lint/suspicious/noExplicitAny: tap xterm internals for cell metrics
-      const core = (terminalRef.current as any)._core;
-      const cellW: number | undefined = core?._renderService?.dimensions?.css?.cell?.width;
-      const cellH: number | undefined = core?._renderService?.dimensions?.css?.cell?.height;
-      if (!cellW || !cellH || cellW <= 0 || cellH <= 0) return; // not rendered yet
+      if (!containerRef.current) return;
       const box = containerRef.current.getBoundingClientRect();
       if (box.width <= 0 || box.height <= 0) return;
-      const cols = Math.max(20, Math.floor(box.width / cellW));
-      const rows = Math.max(5, Math.floor(box.height / cellH));
-      if (cols !== terminalRef.current.cols || rows !== terminalRef.current.rows) {
-        try {
-          terminalRef.current.resize(cols, rows);
-        } catch {
-          /* xterm refuses absurd sizes; ignore */
-        }
+      try {
+        fitAddon.fit();
+      } catch {
+        /* xterm refuses absurd sizes; ignore */
       }
     };
 
-    // First fit fires once xterm paints (cell metrics become real).
-    // We hit `fit` from multiple angles to defeat the layout-not-ready /
-    // font-not-loaded / cell-metrics-not-published race:
-    //
-    //   1. `terminal.onRender` — xterm's per-frame paint signal.
-    //   2. rAF nested rAF — catches the case where onRender already
-    //      fired before the listener attached.
-    //   3. ResizeObserver on the parent — catches container size changes
-    //      (tab toggles, browser zoom, pane drags).
-    //   4. A short setInterval burst for the first ~1.5s — covers
-    //      `document.fonts.ready` and weird Vite HMR remount paths
-    //      where cell metrics flip from default → real after paint.
-    let renderHandlerOff: { dispose(): void } | null = null;
-    try {
-      renderHandlerOff = terminal.onRender(() => fitToContainer());
-    } catch {
-      /* xterm v5 onRender signature variations — fall back to rAF only */
-    }
-    requestAnimationFrame(() => {
-      fitToContainer();
-      requestAnimationFrame(fitToContainer);
-    });
-    // Burst fit for 1.5s so the terminal definitively reaches its
-    // container size by the time the user is ready to read it.
-    const fitBurst = setInterval(fitToContainer, 100);
-    const fitBurstStop = setTimeout(() => clearInterval(fitBurst), 1500);
-    // Also re-fit when web fonts finish loading — Menlo / Monaco may
-    // arrive late and shift cellWidth.
+    // Fit once after the first paint (container has real dimensions), then
+    // on every container size change. Menlo/Monaco can arrive late and shift
+    // cell metrics, so re-fit when web fonts settle too.
+    requestAnimationFrame(fitToContainer);
     if (typeof document !== 'undefined' && 'fonts' in document) {
       (document as unknown as { fonts: { ready: Promise<void> } }).fonts.ready
         .then(() => fitToContainer())
@@ -213,80 +165,124 @@ export const EmbeddedTerminal: React.FC<EmbeddedTerminalProps> = ({
     const ro = new ResizeObserver(() => fitToContainer());
     ro.observe(containerRef.current);
 
-    (async () => {
+    // Register channel + input listeners once. They persist across socket
+    // reconnects (only the server-side room join is lost — see handleReconnect).
+    socket.on('terminal:output', handleOutput);
+    socket.on('terminal:exit', handleExit);
+    socket.on('terminal:ready', handleReady);
+    socket.on('terminal:error', handleReadyError);
+
+    terminal.onData((data) => {
+      socket.emit('terminal:input', { userId, input: data });
+    });
+    terminal.onResize(({ cols, rows }) => {
+      socket.emit('terminal:resize', { userId, cols, rows });
+    });
+
+    // Monotonic attach generation. Each (re)attach bumps it; a disconnect
+    // bumps it too. An attach only applies its result if it's still the
+    // current generation and the socket is still connected — otherwise a stale
+    // pre-disconnect attach could resolve late and wrongly flip the UI back to
+    // "connected", or out-of-order responses across flaps could clobber state.
+    let attachGeneration = 0;
+
+    const attach = async () => {
+      const generation = ++attachGeneration;
       try {
         // The daemon-side terminals.create handles the tab-focus emit when
         // `focusTabName` is supplied — browser sockets are NOT allowed to
         // emit `terminal:tab` directly (rejected by the daemon's gateway
-        // guard).
+        // guard). It is idempotent, so re-issuing it on reconnect is safe.
         const result = (await client.service('terminals').create({
           rows: terminal.rows,
           cols: terminal.cols,
           branchId,
           focusTabName,
-          ensureCliSessionId,
         })) as {
           userId: UserID;
           channel: string;
           sessionName: string;
           isNew: boolean;
+          ready?: boolean;
         };
-        if (!mounted) return;
+        // Drop a stale/superseded attach: another (re)connect started after
+        // this call, or the socket dropped while it was in flight.
+        if (!mounted || generation !== attachGeneration || !socket.connected) return;
 
         currentChannel = result.channel;
         socket.emit('join', result.channel);
-        socket.on('terminal:output', handleOutput);
-        socket.on('terminal:exit', handleExit);
-
-        terminal.onData((data) => {
-          socket.emit('terminal:input', { userId, input: data });
-        });
-        terminal.onResize(({ cols, rows }) => {
-          socket.emit('terminal:resize', { userId, cols, rows });
-        });
-        // Kick a resize to trigger a Zellij full redraw.
+        // Kick a resize to trigger a Zellij full redraw once (re)joined.
         socket.emit('terminal:resize', {
           userId,
           cols: terminal.cols,
           rows: terminal.rows,
         });
 
-        setConnected(true);
+        // Warm path: the executor is already attached, so the response says
+        // it's ready and we connect right away. Cold path: stay in the
+        // connecting state until the executor's `terminal:ready` ack arrives.
+        if (result.ready) {
+          setConnected(true);
+          setReconnecting(false);
+          setError(null);
+        }
       } catch (err) {
+        if (!mounted || generation !== attachGeneration) return;
         const msg = err instanceof Error ? err.message : String(err);
         setError(msg);
+        setReconnecting(false);
         if (terminalRef.current) {
           terminalRef.current.writeln('\r\n[Failed to attach to terminal]');
           terminalRef.current.writeln(`[Error: ${msg}]`);
         }
       }
-    })();
+    };
+
+    // The socket auto-reconnects after a network blip or daemon restart, but
+    // the server-side room membership and (possibly) the executor are gone.
+    // Re-join + re-issue create on every (re)connect; surface a visible
+    // "reconnecting" state rather than silently doing nothing.
+    const handleReconnect = () => {
+      setReconnecting(true);
+      setConnected(false);
+      void attach();
+    };
+    const handleDisconnect = () => {
+      // Invalidate any in-flight attach so a late resolve can't flip us back
+      // to connected while we're actually down.
+      attachGeneration++;
+      setConnected(false);
+      setReconnecting(true);
+    };
+    socket.on('connect', handleReconnect);
+    socket.on('disconnect', handleDisconnect);
+
+    void attach();
 
     return () => {
       mounted = false;
       ro.disconnect();
-      clearInterval(fitBurst);
-      clearTimeout(fitBurstStop);
-      try {
-        renderHandlerOff?.dispose();
-      } catch {
-        /* already disposed */
-      }
       if (terminalRef.current) {
+        // Disposing the terminal also disposes its loaded addons.
         terminalRef.current.dispose();
         terminalRef.current = null;
       }
       if (socket) {
         socket.off('terminal:output', handleOutput);
         socket.off('terminal:exit', handleExit);
+        socket.off('terminal:ready', handleReady);
+        socket.off('terminal:error', handleReadyError);
+        socket.off('connect', handleReconnect);
+        socket.off('disconnect', handleDisconnect);
         if (currentChannel) {
           socket.emit('leave', currentChannel);
         }
       }
       setConnected(false);
+      setReconnecting(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, userId, branchId, focusTabName, ensureCliSessionId]);
+  }, [client, userId, branchId, focusTabName]);
 
   /**
    * Refocus tab when the embedded view becomes visible. Two cases:
@@ -312,7 +308,6 @@ export const EmbeddedTerminal: React.FC<EmbeddedTerminalProps> = ({
           cols: terminalRef.current?.cols ?? 140,
           branchId,
           focusTabName,
-          ensureCliSessionId,
         });
       } catch (err) {
         if (cancelled) return;
@@ -323,7 +318,7 @@ export const EmbeddedTerminal: React.FC<EmbeddedTerminalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [visible, client, userId, branchId, focusTabName, ensureCliSessionId]);
+  }, [visible, client, userId, branchId, focusTabName]);
 
   return (
     <div
@@ -341,12 +336,13 @@ export const EmbeddedTerminal: React.FC<EmbeddedTerminalProps> = ({
         ref={containerRef}
         style={fill ? { flex: 1, minHeight: 0 } : { flex: 1, minHeight: height - 24 }}
       />
-      {error && (
-        <div style={{ color: '#ff7875', fontSize: 12, padding: 4 }}>Terminal error: {error}</div>
-      )}
-      {!connected && !error && (
-        <div style={{ color: '#bfbfbf', fontSize: 12, padding: 4 }}>Connecting to terminal…</div>
-      )}
+      {error ? (
+        <Badge status="error" text={`Terminal error: ${error}`} style={{ padding: 4 }} />
+      ) : reconnecting ? (
+        <Badge status="warning" text="Reconnecting…" style={{ padding: 4 }} />
+      ) : !connected ? (
+        <Badge status="processing" text="Connecting to terminal…" style={{ padding: 4 }} />
+      ) : null}
     </div>
   );
 };

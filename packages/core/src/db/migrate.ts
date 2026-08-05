@@ -26,6 +26,7 @@ import { migrate as migrateSQLite } from 'drizzle-orm/libsql/migrator';
 import { migrate as migratePostgres } from 'drizzle-orm/postgres-js/migrator';
 import type { Database } from './client';
 import { insert, isPostgresDatabase, isSQLiteDatabase, select } from './database-wrapper';
+import { sanitizeDbError } from './sanitize-error';
 import { boards } from './schema';
 import { getCurrentTenantId } from './tenant-scope';
 
@@ -164,11 +165,21 @@ function getMigrationsFolder(db: Database): string {
  * folderMillis against the last applied migration's created_at, NOT hashes.
  * Hash-based checking breaks when migration files are modified after being applied.
  *
+ * `dbAheadOfBinary` is true when the database's max applied migration timestamp
+ * is NEWER than the newest entry in this binary's local journal — i.e. the
+ * database was migrated by a newer release than the one running now. This is the
+ * inverse of `hasPending` (binary ahead of DB) and cannot be detected from the
+ * journal alone, so consumers that require a complete, matching schema (e.g.
+ * tenant deletion) must check it explicitly.
+ *
  * @returns Object with hasPending flag and list of pending migration tags
  */
-export async function checkMigrationStatus(
-  db: Database
-): Promise<{ hasPending: boolean; pending: string[]; applied: string[] }> {
+export async function checkMigrationStatus(db: Database): Promise<{
+  hasPending: boolean;
+  pending: string[];
+  applied: string[];
+  dbAheadOfBinary: boolean;
+}> {
   try {
     const migrationsFolder = getMigrationsFolder(db);
 
@@ -180,6 +191,7 @@ export async function checkMigrationStatus(
     const journalEntries: { tag: string; when: number }[] = journal.entries.map(
       (e: { tag: string; when: number }) => ({ tag: e.tag, when: e.when })
     );
+    const journalMaxWhen = journalEntries.reduce((max, e) => Math.max(max, e.when), 0);
 
     // Get max applied timestamp from database (Drizzle's watermark)
     const hasTable = await hasMigrationsTable(db);
@@ -188,6 +200,7 @@ export async function checkMigrationStatus(
         hasPending: true,
         pending: journalEntries.map((e) => e.tag),
         applied: [],
+        dbAheadOfBinary: false,
       };
     }
 
@@ -208,10 +221,15 @@ export async function checkMigrationStatus(
     const pending = journalEntries.filter((e) => e.when > maxAppliedMillis).map((e) => e.tag);
     const applied = journalEntries.filter((e) => e.when <= maxAppliedMillis).map((e) => e.tag);
 
+    // The database has been migrated by a newer binary than this one when its
+    // watermark is past every migration this binary knows about.
+    const dbAheadOfBinary = maxAppliedMillis > journalMaxWhen;
+
     return {
       hasPending: pending.length > 0,
       pending,
       applied,
+      dbAheadOfBinary,
     };
   } catch (error) {
     const rootCause = getRootCause(error);
@@ -263,30 +281,8 @@ export async function runMigrations(db: Database): Promise<void> {
 
     console.log('✅ Migrations complete');
   } catch (error) {
-    console.error('❌ Migration error details:');
-    console.error('  Error type:', error?.constructor?.name);
-    console.error('  Error message:', error instanceof Error ? error.message : String(error));
-    console.error('  Error stack:', error instanceof Error ? error.stack : 'N/A');
-    if (error && typeof error === 'object') {
-      console.error('  Error keys:', Object.keys(error));
-      // Check for cause (nested error)
-      if ('cause' in error) {
-        console.error('  Cause error:', error.cause);
-        if (error.cause && typeof error.cause === 'object') {
-          console.error('  Cause type:', error.cause.constructor?.name);
-          console.error(
-            '  Cause message:',
-            error.cause instanceof Error ? error.cause.message : String(error.cause)
-          );
-          console.error('  Cause keys:', Object.keys(error.cause));
-        }
-      }
-      console.error('  Full error object:', JSON.stringify(error, null, 2));
-    }
-    throw new MigrationError(
-      `Migration failed: ${error instanceof Error ? error.message : String(error)}`,
-      error
-    );
+    console.error('❌ Migration failed:', sanitizeDbError(error));
+    throw new MigrationError('Migration failed', error);
   }
 }
 

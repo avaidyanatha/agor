@@ -19,7 +19,7 @@ heroImage: '/images/knowledge-hero.png'
 
 Agor **Knowledge** is the built-in context layer for your team command center: a central place where humans and agents can store, organize, connect, and find the context that makes work compound over time.
 
-It has everything required to become your team's main context hub: markdown documents, version history, rich rendering, search, graph links, permissions, and first-class MCP tools for agents. Use it as the source of truth for runbooks, decisions, prompts, teammate memory, and operational knowledge — or as a fast staging area before context moves to another destination. Either way, Knowledge is core to how Agor helps teams and agents accumulate shared understanding.
+It has everything required to become your team's main context hub: markdown documents, version history, rich rendering, search, graph links, permissions, and first-class MCP tools for agents. Use it as the source of truth for runbooks, decisions, prompts, teammate memory, and operational knowledge, or as a fast staging area before context moves to another destination. Either way, Knowledge is core to how Agor helps teams and agents accumulate shared understanding.
 
 Context is everywhere: GitHub, Notion, Linear, Slack, repo files, and other knowledge bases. Agor does not ask you to replace all of that on day one. It gives users and agents a durable default place to file the useful bits now, then search, link, reorganize, and reshuffle them later.
 
@@ -43,15 +43,15 @@ No MCP server setup is required. Knowledge is part of the Agor daemon, and in-Ag
 
 ## What you can store
 
-Knowledge documents are markdown pages grouped into namespaces/spaces. Documents can be tagged by kind — for example `doc`, `memory`, `skill`, `prompt`, `guide`, `decision`, `bundle`, or `external` — and can be public or private.
+Knowledge documents are markdown pages grouped into namespaces/spaces. Documents can be tagged by kind (for example `doc`, `memory`, `skill`, `prompt`, `guide`, `decision`, `bundle`, or `external`) and can be public or private.
 
 Good fits include:
 
-- **Team runbooks** — deploy steps, incident notes, review checklists, escalation paths.
-- **Decisions and rationale** — the “why” behind architecture, product, and process choices.
-- **Reusable prompts and workflows** — instructions that agents should reuse instead of rediscovering.
-- **Teammate memory** — durable preferences, project context, operating principles, and daily learnings.
-- **Scratch-to-structured notes** — context filed quickly now and organized more carefully later.
+- **Team runbooks**: deploy steps, incident notes, review checklists, escalation paths.
+- **Decisions and rationale**: the “why” behind architecture, product, and process choices.
+- **Reusable prompts and workflows**: instructions that agents should reuse instead of rediscovering.
+- **Teammate memory**: durable preferences, project context, operating principles, and daily learnings.
+- **Scratch-to-structured notes**: context filed quickly now and organized more carefully later.
 
 ---
 
@@ -71,7 +71,7 @@ Each content update creates an immutable version, so the page can evolve without
 
 ## Search
 
-Text search is always available. Optional semantic and hybrid search become available when the instance is configured for Knowledge embeddings.
+Text search is always available. Optional semantic and hybrid search become available when a workspace admin enables embeddings in **Knowledge → Settings → Semantic search**.
 
 | Mode         | Use it for                                                     | Requirements                                         |
 | ------------ | -------------------------------------------------------------- | ---------------------------------------------------- |
@@ -80,6 +80,14 @@ Text search is always available. Optional semantic and hybrid search become avai
 | **Hybrid**   | Blend keyword precision with semantic recall                   | Same as semantic                                     |
 
 Semantic search is intentionally optional: the Knowledge base still works without it, but embeddings make it much more powerful as the corpus grows.
+
+Semantic-search policy is workspace-scoped. Admins choose the enabled state, OpenAI model, chunking, and indexing settings in the Knowledge UI; the provider API key is stored encrypted and is never returned to the browser. Operators do not configure this policy in `config.yaml`.
+
+The deployment still supplies the underlying capability. Vector search requires PostgreSQL with pgvector available; SQLite can retain workspace settings and build text-search units, but it cannot perform semantic or hybrid vector search.
+
+> **Upgrading from YAML-based semantic settings:** Before restarting Agor, record any values under `knowledge.semantic_search`, then remove the entire top-level `knowledge:` block from `config.yaml`. Agor rejects that removed configuration instead of silently applying one operator policy to every workspace. After startup, a workspace admin can re-enter the policy in **Knowledge → Settings → Semantic search**. Existing encrypted workspace embedding API keys remain stored and do not need to be copied into YAML.
+
+> **Multi-tenant indexer limitation:** In `required_from_auth` deployments, semantic policy and queued units are isolated correctly per workspace, but the singleton background indexer currently drains only the startup/bootstrap tenant. Other workspaces can safely configure semantic search and queue work, but automatic all-tenant queue discovery is still pending. Static/single-workspace deployments are unaffected.
 
 ---
 
@@ -107,7 +115,7 @@ Knowledge has first-class MCP tools, so agents can use it without leaving their 
 Common workflows:
 
 - **Browse, search, and load context** with `agor_kb_tree`, `agor_kb_search`, `agor_kb_get`, `agor_kb_outline`, and `agor_kb_get_range`.
-  Use `agor_kb_tree({ namespace, pathPrefix?, depth? })` for the common “show me what is in this namespace” request. It returns a compact folder/document tree with icon, title, kind, path, URI, reference URI, and status only — no document content or version metadata.
+  Use `agor_kb_tree({ namespace, pathPrefix?, depth? })` for the common “show me what is in this namespace” request. It returns a compact folder/document tree with icon, title, kind, path, URI, reference URI, and status only. No document content or version metadata.
   `agor_kb_search` is optimized for query discovery: non-empty searches return metadata plus short snippets by default, while browse/listing calls with `query: ""` return metadata only. Use `contentMode: "none" | "snippet" | "full"` and `snippetLines` to control result verbosity, and prefer `agor_kb_get` or `agor_kb_get_range` when you need to read document content.
   For large markdown docs, use `agor_kb_outline` as the map: it returns heading titles, line ranges, compact size hints, duplicate-heading occurrences, and `sectionRef` selectors such as `root.h1[1].h2[2]`. Then call `agor_kb_get_range` with that `sectionRef` (or a line range / `headingPath` + `occurrence`) to read only the needed section with nearby context. For very large sections, page through the selected section with `offsetLines` and `maxLines`.
 - **File new context** with `agor_kb_put` when an agent discovers something worth keeping.
@@ -122,7 +130,7 @@ This makes Knowledge a natural companion to [Teammates](/guide/teammates): teamm
 
 ## Permissions and control plane fit
 
-Knowledge is tied into Agor's existing role-based control plane. Members can create and work with documents and namespaces, admins manage namespace governance and semantic-search settings, and each document carries visibility and edit-policy controls.
+Knowledge is tied into Agor's existing role-based control plane. Members can create and work with documents and namespaces, workspace admins manage semantic-search settings, and namespace owners/admins manage namespace governance. Each document also carries visibility and edit-policy controls.
 
 In practice, that means Knowledge follows the same posture as the rest of Agor: humans and agents collaborate in one system, with view/edit boundaries enforced by the daemon rather than scattered across ad hoc files and local MCP servers.
 

@@ -1,7 +1,7 @@
-import type { Branch, Session } from '@agor-live/client';
-import { fireEvent, render, screen } from '@testing-library/react';
+import type { AgorClient, Branch, Session, Task } from '@agor-live/client';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { App as AntApp } from 'antd';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppActionsProvider } from '../../contexts/AppActionsContext';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import SessionPanel from './SessionPanel';
@@ -62,6 +62,11 @@ vi.mock('./SessionRunSettingsPopover', () => ({
   SessionRunSettingsPopover: () => null,
 }));
 
+const reactive = vi.hoisted(() => ({ tasks: [] as Task[] }));
+vi.mock('../../hooks/useSharedReactiveSession', () => ({
+  useSharedReactiveSession: () => ({ state: { tasks: reactive.tasks } }),
+}));
+
 const connected = {
   connected: true,
   connecting: false,
@@ -90,12 +95,26 @@ const branch = {
   archived: false,
 } as unknown as Branch;
 
-function renderPanel(onOpenTerminal = vi.fn()) {
+function renderPanel({
+  onOpenTerminal = vi.fn(),
+  client = null,
+  activeSession = session,
+}: {
+  onOpenTerminal?: ReturnType<typeof vi.fn>;
+  client?: AgorClient | null;
+  activeSession?: Session;
+} = {}) {
   render(
     <ConnectionProvider value={connected}>
       <AppActionsProvider value={{ onOpenTerminal }}>
         <AntApp>
-          <SessionPanel client={null} session={session} branch={branch} open onClose={vi.fn()} />
+          <SessionPanel
+            client={client}
+            session={activeSession}
+            branch={branch}
+            open
+            onClose={vi.fn()}
+          />
         </AntApp>
       </AppActionsProvider>
     </ConnectionProvider>
@@ -103,7 +122,21 @@ function renderPanel(onOpenTerminal = vi.fn()) {
   return { onOpenTerminal };
 }
 
-describe('SessionPanel terminal actions', () => {
+describe('SessionPanel historical runtime handling and terminal actions', () => {
+  afterEach(() => {
+    reactive.tasks = [];
+    vi.restoreAllMocks();
+  });
+
+  it('keeps removed-runtime history visible without a prompt composer', () => {
+    renderPanel();
+
+    expect(screen.getByText('Historical session — runtime removed')).toBeVisible();
+    expect(screen.getByText(/stored conversation remains readable/i)).toBeVisible();
+    expect(screen.queryByLabelText('Prompt')).not.toBeInTheDocument();
+    expect(screen.getByText('Session content')).toBeVisible();
+  });
+
   it('opens branch terminals with structured branch id routing instead of raw cd input', async () => {
     const { onOpenTerminal } = renderPanel();
 
@@ -112,5 +145,31 @@ describe('SessionPanel terminal actions', () => {
 
     expect(onOpenTerminal).toHaveBeenCalledWith([], 'branch-1');
     expect(onOpenTerminal.mock.calls[0][0]).not.toContain(branch.path);
+  });
+
+  it('surfaces force-fail errors', async () => {
+    reactive.tasks = [
+      {
+        task_id: '018f0000-0000-7000-8000-000000000001',
+        status: 'stopping',
+        sdk_failure: { termination: 'unverified' },
+      } as Task,
+    ];
+    const create = vi.fn().mockRejectedValue(new Error('denied'));
+    vi.spyOn(window, 'prompt').mockReturnValue('018f00000000700080000000');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    renderPanel({
+      client: {
+        service: () => ({ create, on: vi.fn(), off: vi.fn() }),
+      } as unknown as AgorClient,
+      activeSession: { ...session, status: 'stopping', agentic_tool: 'codex' },
+    });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
+
+    await waitFor(() => expect(create).toHaveBeenCalledOnce());
+    expect(
+      await screen.findByText('Failed to force-fail execution. You can try again.')
+    ).toBeVisible();
   });
 });
