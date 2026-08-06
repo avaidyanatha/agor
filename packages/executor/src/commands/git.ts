@@ -1025,6 +1025,11 @@ export async function handleGitBranchAdd(
   options: CommandOptions
 ): Promise<ExecutorResult> {
   const branchId = payload.params.branchId;
+  // Echoed on every terminal patch below so the daemon can drop this
+  // acknowledgement if a retry superseded the attempt while we were running.
+  const attemptFence = payload.params.provisioningAttemptId
+    ? { provisioning_attempt_id: payload.params.provisioningAttemptId }
+    : {};
   let resolvedRepoPath: string | undefined;
   let resolvedBranchPath: string | undefined;
   let resolvedBranchName: string | undefined;
@@ -1251,6 +1256,7 @@ export async function handleGitBranchAdd(
       console.log(`[git.branch.add] Marking branch ${shortId(branchId)} as ready`);
       await client.service('branches').patch(branchId, {
         filesystem_status: 'ready',
+        ...attemptFence,
         ...(unixGroup ? { unix_group: unixGroup } : {}),
         ...(renderedTemplates || {}),
       });
@@ -1342,6 +1348,7 @@ export async function handleGitBranchAdd(
         await client.service('branches').patch(branchId, {
           filesystem_status: 'failed',
           error_message: userMessage,
+          ...attemptFence,
         });
         console.log(`[git.branch.add] Marked branch as failed`);
       } catch (patchError) {
