@@ -1,5 +1,5 @@
 import type { ActiveUser, AgorClient, Board, BoardID, User } from '@agor-live/client';
-import { BulbOutlined } from '@ant-design/icons';
+import { BookOutlined } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import { Button, Divider, Layout, Popover, Space, Tag, Tooltip, theme } from 'antd';
 import { memo, useMemo } from 'react';
@@ -7,7 +7,6 @@ import { useHref, useNavigate } from 'react-router-dom';
 import { mapToArray } from '@/utils/mapHelpers';
 import { useConnectionDisabled } from '../../contexts/ConnectionContext';
 import { useTheme } from '../../contexts/ThemeContext';
-import { useRecentBoards } from '../../hooks/useRecentBoards';
 import { useAgorStore } from '../../store/agorStore';
 import { selectBoardById, selectBranchById, selectUserById } from '../../store/selectors';
 import { BoardSwitcher } from '../BoardSwitcher';
@@ -56,44 +55,6 @@ export interface AppHeaderProps {
   instanceDescription?: string;
 }
 
-const RecentBoardPills: React.FC<{
-  recentBoards: Board[];
-  onBoardChange: (boardId: string) => void;
-  token: ReturnType<typeof theme.useToken>['token'];
-}> = ({ recentBoards, onBoardChange, token }) => {
-  if (recentBoards.length === 0) return null;
-
-  return (
-    <Space size={4}>
-      {recentBoards.map((board) => (
-        <Tooltip key={board.board_id} title={board.name} placement="bottom">
-          <Button
-            type="text"
-            size="small"
-            aria-label={`Switch to board ${board.name}`}
-            onClick={() => onBoardChange(board.board_id)}
-            style={{
-              width: 30,
-              height: 30,
-              minWidth: 30,
-              padding: 0,
-              borderRadius: '50%',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: 16,
-              border: `1px solid ${token.colorBorderSecondary}`,
-              background: token.colorBgElevated,
-            }}
-          >
-            {board.icon || '📋'}
-          </Button>
-        </Tooltip>
-      ))}
-    </Space>
-  );
-};
-
 const AppHeaderInner: React.FC<AppHeaderProps> = ({
   user,
   presenceClient = null,
@@ -133,11 +94,6 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
   const branchById = useAgorStore(selectBranchById);
   const boards = useMemo(() => mapToArray(boardById), [boardById]);
   const presenceUsers = useMemo(() => mapToArray(userById), [userById]);
-  // Derive the recent-board pills here (not as a prop): the source array is the
-  // store-derived `boards`, so unrelated App re-renders can't hand us a fresh
-  // recents array and defeat React.memo. The localStorage-backed recents list is
-  // shared across hook instances, so this stays in sync with App's visit tracker.
-  const { recentBoards } = useRecentBoards(boards, currentBoardId ?? '');
   // Single source of truth for "is the daemon usable right now?". Captures
   // disconnected, the 1.5s reconnect grace window, and out-of-sync. Don't
   // gate off raw `connected` — it stays true through the grace window.
@@ -232,9 +188,9 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
         {/* Disconnected pattern: navbar elements that lead to server-fetching
             or mutating surfaces are *disabled* (not hidden) via
             useConnectionDisabled (covers disconnect + reconnect grace window
-            + out-of-sync). Local-only navigation (BoardSwitcher,
-            RecentBoardPills, theme, external doc link, presence display)
-            stays fully alive — those never depend on the daemon.
+            + out-of-sync). Local-only navigation (BoardSwitcher, theme,
+            external doc link, presence display) stays fully alive — those
+            never depend on the daemon.
             See docs/disconnected-state-design.md. */}
         <div style={{ minWidth: 200 }}>
           <BoardSwitcher
@@ -248,13 +204,6 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
             onUpdateBoard={onUpdateBoard}
           />
         </div>
-        {boards.length > 0 && (
-          <RecentBoardPills
-            recentBoards={recentBoards}
-            onBoardChange={onBoardChange || (() => {})}
-            token={token}
-          />
-        )}
       </Space>
 
       <Space>
@@ -282,7 +231,7 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
         <Tooltip title="Knowledge Base">
           <Button
             type="text"
-            icon={<BulbOutlined style={{ fontSize: token.fontSizeLG }} />}
+            icon={<BookOutlined style={{ fontSize: token.fontSizeLG }} />}
             href={knowledgeHref}
             aria-label="Knowledge Base"
             onClick={(event) => {

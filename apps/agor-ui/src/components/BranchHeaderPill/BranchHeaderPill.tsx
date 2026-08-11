@@ -14,7 +14,7 @@ import {
   PlayCircleOutlined,
   RobotOutlined,
   StopOutlined,
-  TeamOutlined,
+  UnorderedListOutlined,
 } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import { Dropdown, Tooltip, theme } from 'antd';
@@ -203,7 +203,7 @@ export function BranchHeaderPill({
     {
       key: 'tab:sessions',
       label: `Sessions${sessionCount != null ? ` (${sessionCount})` : ''}`,
-      icon: <TeamOutlined />,
+      icon: <UnorderedListOutlined />,
     },
     { key: 'tab:environment', label: 'Environment', icon: <GlobalOutlined /> },
     { key: 'tab:files', label: 'Files', icon: <FolderOutlined /> },

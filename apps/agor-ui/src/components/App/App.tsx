@@ -19,14 +19,9 @@ import type {
   User,
 } from '@agor-live/client';
 import { hasMinimumRole, PermissionScope } from '@agor-live/client';
-import { Layout, theme, Upload } from 'antd';
+import { Empty, Layout, theme, Upload } from 'antd';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import {
-  type ImperativePanelHandle,
-  Panel,
-  PanelGroup,
-  PanelResizeHandle,
-} from 'react-resizable-panels';
+import type { ImperativePanelHandle } from 'react-resizable-panels';
 import { useLocation, useParams } from 'react-router-dom';
 import type { BranchStorageConfig } from '@/utils/branchStorage';
 import { AppActionsProvider } from '../../contexts/AppActionsContext';
@@ -104,6 +99,7 @@ import {
   toContentRelativePercent,
   toViewportRelativePercent,
 } from './panelSizing';
+import { WorkspaceLayout } from './WorkspaceLayout';
 
 const { Content } = Layout;
 
@@ -644,11 +640,10 @@ export const App: React.FC<AppProps> = ({
   const [logsModalBranchId, setLogsModalBranchId] = useState<string | null>(null);
   const [themeEditorOpen, setThemeEditorOpen] = useState(false);
 
-  // Initialize event stream panel state from localStorage (collapsed by default)
-  const [eventStreamPanelCollapsed, setEventStreamPanelCollapsed] = useLocalStorage<boolean>(
-    'agor:eventStreamPanelCollapsed',
-    true
-  );
+  // Session-scoped (not persisted): the event stream only occupies the session
+  // slot when explicitly opened via Settings → Live Events, and never
+  // resurrects itself across reloads.
+  const [eventStreamPanelCollapsed, setEventStreamPanelCollapsed] = useState(true);
 
   // Recent-board visit tracking + the id list HomePage consumes. AppHeader owns
   // its own pill derivation from the store (so it isn't fed an unstable array),
@@ -1447,11 +1442,8 @@ export const App: React.FC<AppProps> = ({
         />
         {topBanner}
         <Content style={{ position: 'relative', overflow: 'hidden', display: 'flex' }}>
-          <PanelGroup
-            id="main-layout"
-            direction="horizontal"
-            style={{ flex: 1 }}
-            onLayout={(sizes) => {
+          <WorkspaceLayout
+            onMainLayout={(sizes) => {
               // Persist only user drag updates. Programmatic resizing enforces
               // the responsive minimum without clobbering the user's desired size.
               if (!leftPanelCollapsed && leftPanelResizeDraggingRef.current && sizes.length >= 2) {
@@ -1465,214 +1457,166 @@ export const App: React.FC<AppProps> = ({
                 );
               }
             }}
-          >
-            <Panel id="content-panel" order={1} defaultSize={contentPanelWidthPercent} minSize={40}>
-              <PanelGroup
-                id="canvas-session"
-                direction="horizontal"
-                style={{ flex: 1 }}
-                onLayout={(sizes) => {
-                  // Persist only user drag updates so panel open/close and
-                  // programmatic restores do not overwrite the user's preference.
-                  // sizes[1] is content-relative (react-resizable-panels sizes
-                  // panels relative to their own PanelGroup) — convert back to
-                  // viewport-relative before persisting, matching the frame
-                  // sessionPanelSize is stored in.
-                  if (
-                    effectiveSelectedSessionId &&
-                    rightPanelResizeDraggingRef.current &&
-                    sizes.length === 2
-                  ) {
-                    const viewportRelativeSize = toViewportRelativePercent(
-                      sizes[1],
-                      contentPanelWidthPercent
-                    );
-                    setSessionPanelSize(
-                      clampPercent(
-                        viewportRelativeSize,
-                        sessionPanelMinSize,
-                        SESSION_PANEL_MAX_SIZE_PERCENT
-                      )
-                    );
-                  }
-                }}
-              >
-                <Panel
-                  id="canvas-panel"
-                  order={1}
-                  defaultSize={sessionPanelTargetOpen ? 100 - sessionPanelSizeWithinContent : 100}
-                  minSize={CANVAS_MIN_SIZE_PERCENT}
-                >
-                  <div style={{ position: 'relative', overflow: 'hidden', height: '100%' }}>
-                    {isHomeSurface ? (
-                      <HomePage
-                        recentBoardIds={recentBoardIds}
-                        currentUserId={user?.user_id}
-                        onBoardClick={handleHomeBoardClick}
-                        onSessionClick={handleSessionClick}
-                        onOpenCreateDialog={handleHomeOpenCreateDialog}
-                        onOpenSettings={openSettings}
-                      />
-                    ) : (
-                      <SessionCanvas
-                        ref={sessionCanvasRef}
-                        board={currentBoard || null}
-                        client={client}
-                        branches={boardBranches}
-                        primaryTeammateId={primaryTeammateId}
-                        currentUserId={user?.user_id}
-                        selectedSessionId={effectiveSelectedSessionId}
-                        activeUrlTargetBranchId={activeUrlTargetBranchId}
-                        activeUrlTargetArtifactId={activeUrlTargetArtifactId}
-                        availableAgents={availableAgents}
-                        onSessionClick={handleSessionClick}
-                        onSessionUpdate={stableOnSessionUpdate}
-                        onSessionDelete={stableOnSessionDelete}
-                        onForkSession={stableOnForkSession}
-                        onSpawnSession={stableOnSpawnSession}
-                        onUpdateSessionMcpServers={stableOnUpdateSessionMcpServers}
-                        onOpenSettings={setSessionSettingsId}
-                        onCreateSessionForBranch={handleQuickStartSession}
-                        onOpenBranch={setBranchModalBranchId}
-                        onArchiveOrDeleteBranch={stableOnArchiveOrDeleteBranch}
-                        onOpenTerminal={canOpenTerminal ? handleOpenTerminal : undefined}
-                        onStartEnvironment={stableOnStartEnvironment}
-                        onStopEnvironment={stableOnStopEnvironment}
-                        onViewLogs={setLogsModalBranchId}
-                        onNukeEnvironment={stableOnNukeEnvironment}
-                        onOpenCommentsPanel={handleOpenCommentsPanel}
-                        onCommentHover={setHoveredCommentId}
-                        onCommentSelect={handleCommentSelect}
-                      />
-                    )}
-                    {!isHomeSurface && (
-                      <NewSessionButton
-                        onClick={() => {
-                          const center = sessionCanvasRef.current?.getViewportCenter();
-                          setNewBranchDefaultPosition(center || null);
-                          setCreateDialogDefaultTab('teammate');
-                          setCreateDialogOpen(true);
-                        }}
-                      />
-                    )}
-                  </div>
-                </Panel>
-                {(sessionPanelTargetOpen || !eventStreamPanelCollapsed) && (
-                  <>
-                    <PanelResizeHandle
-                      style={{
-                        width: '4px',
-                        background: token.colorBorderSecondary,
-                        cursor: 'col-resize',
-                        transition: 'background 0.2s',
-                      }}
-                      onDragging={(isDragging) => {
-                        rightPanelResizeDraggingRef.current = isDragging;
-                      }}
-                      onMouseEnter={(e) => {
-                        (e.currentTarget as unknown as HTMLDivElement).style.background =
-                          token.colorPrimary;
-                      }}
-                      onMouseLeave={(e) => {
-                        (e.currentTarget as unknown as HTMLDivElement).style.background =
-                          token.colorBorderSecondary;
-                      }}
-                    />
-                    <Panel
-                      id="session-panel"
-                      order={2}
-                      ref={sessionPanelRef}
-                      defaultSize={sessionPanelSizeWithinContent}
-                      minSize={sessionPanelMinSizeWithinContent}
-                      maxSize={sessionPanelMaxSizeWithinContent}
-                    >
-                      {effectiveSelectedSessionId ? (
-                        <SessionPanel
-                          client={client}
-                          session={selectedSession}
-                          branch={selectedSessionBranch}
-                          currentUserId={user?.user_id}
-                          sessionMcpServerIds={selectedSessionMcpServerIds}
-                          open={!!effectiveSelectedSessionId}
-                          onClose={handleCloseSessionPanel}
-                          uploadPolicy={uploadPolicy}
-                        />
-                      ) : pendingToolChoiceBranchId ? (
-                        <PendingToolChoicePanel
-                          branch={pendingToolChoiceBranch}
-                          availableAgents={availableAgents}
-                          onChoose={async (tool) => {
-                            await chooseAgenticTool(pendingToolChoiceBranchId, tool);
-                          }}
-                          onClose={handleCloseSessionPanel}
-                          onAdvancedSetup={() => {
-                            setNewSessionBranchId(pendingToolChoiceBranchId);
-                            setPendingToolChoiceBranchId(null);
-                          }}
-                        />
-                      ) : (
-                        <EventStreamPanel
-                          collapsed={false}
-                          onToggleCollapse={() => setEventStreamPanelCollapsed(true)}
-                          events={events}
-                          onClear={clearEvents}
-                          currentUserId={user?.user_id}
-                          selectedSessionId={effectiveSelectedSessionId}
-                          currentBoard={currentBoard}
-                          client={client}
-                          branchActions={eventStreamBranchActions}
-                        />
-                      )}
-                    </Panel>
-                  </>
+            onContentLayout={(sizes) => {
+              // Persist only user drag updates so panel open/close and
+              // programmatic restores do not overwrite the user's preference.
+              // sizes[1] is content-relative (react-resizable-panels sizes
+              // panels relative to their own PanelGroup) — convert back to
+              // viewport-relative before persisting, matching the frame
+              // sessionPanelSize is stored in.
+              if (
+                effectiveSelectedSessionId &&
+                rightPanelResizeDraggingRef.current &&
+                sizes.length === 2
+              ) {
+                const viewportRelativeSize = toViewportRelativePercent(
+                  sizes[1],
+                  contentPanelWidthPercent
+                );
+                setSessionPanelSize(
+                  clampPercent(
+                    viewportRelativeSize,
+                    sessionPanelMinSize,
+                    SESSION_PANEL_MAX_SIZE_PERCENT
+                  )
+                );
+              }
+            }}
+            contentPanelWidthPercent={contentPanelWidthPercent}
+            canvasDefaultSize={sessionPanelTargetOpen ? 100 - sessionPanelSizeWithinContent : 100}
+            canvasMinSize={CANVAS_MIN_SIZE_PERCENT}
+            sessionSlotOpen={sessionPanelTargetOpen || !eventStreamPanelCollapsed}
+            sessionPanelRef={sessionPanelRef}
+            sessionPanelDefaultSize={sessionPanelSizeWithinContent}
+            sessionPanelMinSize={sessionPanelMinSizeWithinContent}
+            sessionPanelMaxSize={sessionPanelMaxSizeWithinContent}
+            onSessionHandleDragging={(isDragging) => {
+              rightPanelResizeDraggingRef.current = isDragging;
+            }}
+            sidePanelRef={commentsPanelRef}
+            sidePanelCollapsed={leftPanelCollapsed}
+            sidePanelCollapsedSize={leftPanelCollapsedSize}
+            sidePanelDefaultSize={effectiveCommentsPanelSize}
+            sidePanelMinSize={leftPanelMinSize}
+            sidePanelMaxSize={LEFT_PANEL_MAX_SIZE_PERCENT}
+            sidePanelMinWidthPx={
+              leftPanelCollapsed
+                ? leftPanelRailVisible
+                  ? LEFT_PANEL_RAIL_WIDTH_PX
+                  : 0
+                : LEFT_PANEL_MIN_WIDTH_PX
+            }
+            onSideHandleDragging={(isDragging) => {
+              leftPanelResizeDraggingRef.current = isDragging;
+            }}
+            canvasContent={
+              <>
+                {isHomeSurface ? (
+                  <HomePage
+                    recentBoardIds={recentBoardIds}
+                    currentUserId={user?.user_id}
+                    onBoardClick={handleHomeBoardClick}
+                    onSessionClick={handleSessionClick}
+                    onOpenCreateDialog={handleHomeOpenCreateDialog}
+                    onOpenSettings={openSettings}
+                  />
+                ) : (
+                  <SessionCanvas
+                    ref={sessionCanvasRef}
+                    board={currentBoard || null}
+                    client={client}
+                    branches={boardBranches}
+                    primaryTeammateId={primaryTeammateId}
+                    currentUserId={user?.user_id}
+                    selectedSessionId={effectiveSelectedSessionId}
+                    activeUrlTargetBranchId={activeUrlTargetBranchId}
+                    activeUrlTargetArtifactId={activeUrlTargetArtifactId}
+                    availableAgents={availableAgents}
+                    onSessionClick={handleSessionClick}
+                    onSessionUpdate={stableOnSessionUpdate}
+                    onSessionDelete={stableOnSessionDelete}
+                    onForkSession={stableOnForkSession}
+                    onSpawnSession={stableOnSpawnSession}
+                    onUpdateSessionMcpServers={stableOnUpdateSessionMcpServers}
+                    onOpenSettings={setSessionSettingsId}
+                    onCreateSessionForBranch={handleQuickStartSession}
+                    onOpenBranch={setBranchModalBranchId}
+                    onArchiveOrDeleteBranch={stableOnArchiveOrDeleteBranch}
+                    onOpenTerminal={canOpenTerminal ? handleOpenTerminal : undefined}
+                    onStartEnvironment={stableOnStartEnvironment}
+                    onStopEnvironment={stableOnStopEnvironment}
+                    onViewLogs={setLogsModalBranchId}
+                    onNukeEnvironment={stableOnNukeEnvironment}
+                    onOpenCommentsPanel={handleOpenCommentsPanel}
+                    onCommentHover={setHoveredCommentId}
+                    onCommentSelect={handleCommentSelect}
+                  />
                 )}
-              </PanelGroup>
-            </Panel>
-            <PanelResizeHandle
-              style={{
-                position: 'relative',
-                width: leftPanelCollapsed ? '0px' : '4px',
-                background: token.colorBorderSecondary,
-                cursor: leftPanelCollapsed ? 'default' : 'col-resize',
-                transition: 'background 0.2s',
-                pointerEvents: leftPanelCollapsed ? 'none' : 'auto',
-                overflow: 'visible',
-                zIndex: 10,
-              }}
-              onDragging={(isDragging) => {
-                leftPanelResizeDraggingRef.current = isDragging;
-              }}
-              onMouseEnter={(e) => {
-                if (!leftPanelCollapsed) {
-                  (e.currentTarget as unknown as HTMLDivElement).style.background =
-                    token.colorPrimary;
-                }
-              }}
-              onMouseLeave={(e) => {
-                if (!leftPanelCollapsed) {
-                  (e.currentTarget as unknown as HTMLDivElement).style.background =
-                    token.colorBorderSecondary;
-                }
-              }}
-            />
-            <Panel
-              id="teammate-panel"
-              order={2}
-              ref={commentsPanelRef}
-              collapsible
-              defaultSize={leftPanelCollapsed ? leftPanelCollapsedSize : effectiveCommentsPanelSize}
-              collapsedSize={leftPanelCollapsedSize}
-              minSize={leftPanelCollapsed ? leftPanelCollapsedSize : leftPanelMinSize}
-              maxSize={LEFT_PANEL_MAX_SIZE_PERCENT}
-              style={{
-                minWidth: leftPanelCollapsed
-                  ? leftPanelRailVisible
-                    ? LEFT_PANEL_RAIL_WIDTH_PX
-                    : 0
-                  : LEFT_PANEL_MIN_WIDTH_PX,
-              }}
-            >
-              {leftPanelCollapsed ? (
+                {!isHomeSurface && (
+                  <NewSessionButton
+                    onClick={() => {
+                      const center = sessionCanvasRef.current?.getViewportCenter();
+                      setNewBranchDefaultPosition(center || null);
+                      setCreateDialogDefaultTab('teammate');
+                      setCreateDialogOpen(true);
+                    }}
+                  />
+                )}
+              </>
+            }
+            sessionContent={
+              effectiveSelectedSessionId ? (
+                <SessionPanel
+                  client={client}
+                  session={selectedSession}
+                  branch={selectedSessionBranch}
+                  currentUserId={user?.user_id}
+                  sessionMcpServerIds={selectedSessionMcpServerIds}
+                  open={!!effectiveSelectedSessionId}
+                  onClose={handleCloseSessionPanel}
+                  uploadPolicy={uploadPolicy}
+                />
+              ) : pendingToolChoiceBranchId ? (
+                <PendingToolChoicePanel
+                  branch={pendingToolChoiceBranch}
+                  availableAgents={availableAgents}
+                  onChoose={async (tool) => {
+                    await chooseAgenticTool(pendingToolChoiceBranchId, tool);
+                  }}
+                  onClose={handleCloseSessionPanel}
+                  onAdvancedSetup={() => {
+                    setNewSessionBranchId(pendingToolChoiceBranchId);
+                    setPendingToolChoiceBranchId(null);
+                  }}
+                />
+              ) : !eventStreamPanelCollapsed ? (
+                <EventStreamPanel
+                  collapsed={false}
+                  onToggleCollapse={() => setEventStreamPanelCollapsed(true)}
+                  events={events}
+                  onClear={clearEvents}
+                  currentUserId={user?.user_id}
+                  selectedSessionId={effectiveSelectedSessionId}
+                  currentBoard={currentBoard}
+                  client={client}
+                  branchActions={eventStreamBranchActions}
+                />
+              ) : (
+                <div
+                  style={{
+                    height: '100%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    background: token.colorBgContainer,
+                  }}
+                >
+                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No session selected" />
+                </div>
+              )
+            }
+            sideContent={
+              leftPanelCollapsed ? (
                 leftPanelRailVisible && (
                   <TeammatePanelRail
                     onSelectTab={handleSelectTeammatePanelTab}
@@ -1717,9 +1661,9 @@ export const App: React.FC<AppProps> = ({
                   deferSessionDetails={homeExitPanelDetailsDeferred}
                   onDeferredDetailsHydrated={handleDeferredDetailsHydrated}
                 />
-              )}
-            </Panel>
-          </PanelGroup>
+              )
+            }
+          />
         </Content>
         {/* Invisible mount of antd Upload so its CSS-in-JS styles stay
               registered even after the SessionPanel (which contains FileUpload)

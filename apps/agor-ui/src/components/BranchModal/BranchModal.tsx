@@ -1,6 +1,6 @@
 import type { AgorClient, BoardEntityObject, Branch, Repo, Session, User } from '@agor-live/client';
 import { getTeammateConfig, isTeammate } from '@agor-live/client';
-import { Badge, Button, Modal, Space, Tabs, theme } from 'antd';
+import { Badge, Button, Drawer, Space, Tabs, theme } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
 import { mapToArray } from '@/utils/mapHelpers';
 import { useAgorStore } from '../../store/agorStore';
@@ -290,16 +290,21 @@ export const BranchModal: React.FC<BranchModalProps> = ({
     </Space>
   );
 
+  // Drawer, not modal: the board stays visible and interactive while branch
+  // settings are open (no mask), matching the side-panel-first layout.
   return (
-    <Modal
+    <Drawer
       title={title}
       open={open}
-      onCancel={onClose}
+      onClose={onClose}
+      placement="right"
+      width={760}
+      mask={false}
       footer={footer}
-      width={900}
-      mask={{ closable: false }}
       styles={{
-        body: { padding: 0, maxHeight: '80vh', overflowY: 'auto' },
+        body: { paddingTop: 0 },
+        footer: { textAlign: 'right' },
+        wrapper: { maxWidth: '100vw' },
       }}
     >
       <Tabs
@@ -307,6 +312,6 @@ export const BranchModal: React.FC<BranchModalProps> = ({
         onChange={(key) => setActiveTab(key as BranchModalTab)}
         items={tabItems}
       />
-    </Modal>
+    </Drawer>
   );
 };

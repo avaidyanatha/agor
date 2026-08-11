@@ -27,7 +27,7 @@ import type { AgorClient, Group, User } from '@agor-live/client';
 import {
   ApartmentOutlined,
   ArrowLeftOutlined,
-  BulbOutlined,
+  BookOutlined,
   DeleteOutlined,
   DownOutlined,
   EditOutlined,
@@ -2942,7 +2942,7 @@ export function KnowledgePage({
             }}
             onClick={goToGraphHome}
           >
-            <BulbOutlined style={{ color: token.colorTextSecondary }} />
+            <BookOutlined style={{ color: token.colorTextSecondary }} />
             Knowledge
           </Text>
           <Tooltip title="Knowledge is in beta — expect rough edges while the data model, MCP tools, and editor settle.">
