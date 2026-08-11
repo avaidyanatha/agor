@@ -5,6 +5,7 @@ import {
   BookOutlined,
   BranchesOutlined,
   CalendarOutlined,
+  DownOutlined,
   EditOutlined,
   FileTextOutlined,
   FireOutlined,
@@ -154,6 +155,8 @@ export function BranchHeaderPill({
       >
         {branch.name}
       </span>
+      {/* Menu affordance — signals the identity is a dropdown trigger */}
+      <DownOutlined style={{ fontSize: 9, opacity: 0.65, flexShrink: 0 }} />
     </>
   );
 
@@ -320,6 +323,12 @@ export function BranchHeaderPill({
           aria-label={identityLabel}
           aria-haspopup="menu"
           onClick={(e) => e.stopPropagation()}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = token.colorFillSecondary;
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = 'none';
+          }}
           style={{
             display: 'inline-flex',
             alignItems: 'center',
@@ -331,6 +340,7 @@ export function BranchHeaderPill({
             border: 'none',
             color: 'inherit',
             font: 'inherit',
+            transition: 'background 0.15s',
             ...(truncateToFit ? { flex: '1 1 auto', minWidth: 0, overflow: 'hidden' } : {}),
           }}
         >
