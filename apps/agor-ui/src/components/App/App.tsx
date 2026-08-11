@@ -30,7 +30,6 @@ import { useAppNavigation } from '../../hooks/useAppNavigation';
 import { useBoardTitle } from '../../hooks/useBoardTitle';
 import { useEventStream } from '../../hooks/useEventStream';
 import { useFaviconStatus } from '../../hooks/useFaviconStatus';
-import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { useRecentBoards } from '../../hooks/useRecentBoards';
 import { useSettingsRoute } from '../../hooks/useSettingsRoute';
 import { useStableCallback } from '../../hooks/useStableCallback';
@@ -487,11 +486,11 @@ export const App: React.FC<AppProps> = ({
   // is a valid no-board route, so do not auto-select localStorage/first board.
   const [currentBoardId, setCurrentBoardIdInternal] = useState(() => initialBoardId || '');
 
-  // Initialize comments panel state from localStorage (collapsed by default)
-  const [commentsPanelCollapsed, setCommentsPanelCollapsed] = useLocalStorage<boolean>(
-    'agor:commentsPanelCollapsed',
-    false
-  );
+  // Session-scoped, collapsed by default: the side panel starts as a rail on
+  // every app load and only expands on user action. Persisting the expanded
+  // state made the panel slide open on its own ~1.2s after entering a board
+  // (once the home-exit deferral timer cleared).
+  const [commentsPanelCollapsed, setCommentsPanelCollapsed] = useState(true);
 
   // Left panel size persistence (percentage of available width), scoped per user.
   const [commentsPanelSize, setCommentsPanelSize] = useUserLocalStorage<number>(
@@ -788,7 +787,7 @@ export const App: React.FC<AppProps> = ({
       setLeftPanelTab(state.activeTab);
       setCommentsPanelCollapsed(state.collapsed);
     },
-    [setCommentsPanelCollapsed]
+    []
   );
 
   const handleToggleBoardPanel = useCallback(() => {
@@ -1441,7 +1440,19 @@ export const App: React.FC<AppProps> = ({
           instanceDescription={instanceDescription}
         />
         {topBanner}
-        <Content style={{ position: 'relative', overflow: 'hidden', display: 'flex' }}>
+        {/* flex:1 + minHeight:0 pin the workspace to the viewport remainder;
+            without them the flex item's auto min-height lets the canvas
+            overflow below the fold by the header height (the old minimap
+            margin-bottom:75px hack compensated for this). */}
+        <Content
+          style={{
+            position: 'relative',
+            overflow: 'hidden',
+            display: 'flex',
+            flex: 1,
+            minHeight: 0,
+          }}
+        >
           <WorkspaceLayout
             onMainLayout={(sizes) => {
               // Persist only user drag updates. Programmatic resizing enforces

@@ -1,7 +1,9 @@
 /* biome-ignore-all lint/plugin/noFirstPartyCss: React Flow integration, tool cursors, and resize hit areas require third-party selectors */
-/* Adjust MiniMap panel to have more bottom spacing */
+/* Keep the minimap level with the bottom toolbar. (The old 75px value was
+   compensating for the canvas overflowing below the fold — fixed at the
+   layout level in App.tsx.) */
 .react-flow__panel.react-flow__minimap.bottom.right {
-  margin-bottom: 75px;
+  margin-bottom: 20px;
 }
 
 /* Theme-aware React Flow controls — horizontal floating toolbar at the

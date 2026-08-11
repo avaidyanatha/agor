@@ -36,7 +36,10 @@ vi.mock('../SessionPanel/PendingToolChoicePanel', () => ({
 }));
 
 vi.mock('../AppHeader', () => ({ AppHeader: () => null }));
-vi.mock('../BoardTeammatePanel', () => ({ BoardTeammatePanel: () => null }));
+vi.mock('../BoardTeammatePanel', () => ({
+  BoardTeammatePanel: () => null,
+  TeammatePanelRail: () => null,
+}));
 vi.mock('../HomePage', () => ({ HomePage: () => null }));
 // SessionPanel is mocked to surface both its identity (`session-panel`) and the
 // in-drawer "Switch tool" affordance, which drives `onChooseAgenticTool` with a
