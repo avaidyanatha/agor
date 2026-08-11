@@ -31,7 +31,7 @@ import {
 } from '@agor-live/client';
 import { DownOutlined, KeyOutlined, SettingOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import type { CollapseProps } from 'antd';
-import { Collapse, Divider, Form, Modal, Typography, theme } from 'antd';
+import { Button, Collapse, Divider, Drawer, Form, Space, Typography, theme } from 'antd';
 import React from 'react';
 import { useAgorStore } from '../../store/agorStore';
 import { selectMcpServerById, selectSessionMcpServerIds } from '../../store/selectors';
@@ -218,11 +218,15 @@ export const SessionSettingsModal: React.FC<SessionSettingsModalProps> = ({
     useAgorStore(selectSessionMcpServerIds).get(session.session_id) ?? EMPTY_MCP_SERVER_IDS;
   const [form] = Form.useForm();
   const watchedPresetId = Form.useWatch('agenticToolPresetId', form) as string | undefined;
-  const isInlineConfig = watchedPresetId === INLINE_AGENTIC_CONFIGURATION;
 
   const [initialValues, setInitialValues] = React.useState<FormValues>(() =>
     buildInitialValues(session, sessionMcpServerIds)
   );
+  // useWatch reads undefined until the Form mounts inside the drawer body;
+  // fall back to the initial value so preset-dependent sections don't flash
+  // out on open.
+  const isInlineConfig =
+    (watchedPresetId ?? initialValues.agenticToolPresetId) === INLINE_AGENTIC_CONFIGURATION;
   const [envSelections, setEnvSelections] = React.useState<string[]>([]);
   const [initialEnvSelections, setInitialEnvSelections] = React.useState<string[]>([]);
   const prevOpenRef = React.useRef(false);
@@ -411,26 +415,43 @@ export const SessionSettingsModal: React.FC<SessionSettingsModalProps> = ({
 
   if (!activeAgenticTool) {
     return (
-      <Modal title="Historical Session" open={open} onCancel={onClose} footer={null} width={600}>
+      <Drawer
+        title="Historical Session"
+        open={open}
+        onClose={onClose}
+        placement="right"
+        size={600}
+        mask={false}
+      >
         <Typography.Paragraph>
           This session used the removed experimental Claude Code CLI integration. Its stored
           metadata and conversation remain readable, but its runtime settings cannot be changed and
           the session cannot be resumed.
         </Typography.Paragraph>
         <SessionIdsList session={session} />
-      </Modal>
+      </Drawer>
     );
   }
 
+  // Drawer, not modal: session settings sit beside the board/session panel
+  // without blocking them, matching BranchModal's drawer conversion.
   return (
-    <Modal
+    <Drawer
       title="Session Settings"
       open={open}
-      onOk={handleOk}
-      onCancel={handleCancel}
-      okText="Save"
-      cancelText="Cancel"
-      width={600}
+      onClose={handleCancel}
+      placement="right"
+      size={600}
+      mask={false}
+      footer={
+        <Space>
+          <Button onClick={handleCancel}>Cancel</Button>
+          <Button type="primary" onClick={handleOk}>
+            Save
+          </Button>
+        </Space>
+      }
+      styles={{ footer: { textAlign: 'right' } }}
     >
       <Form
         form={form}
@@ -473,6 +494,6 @@ export const SessionSettingsModal: React.FC<SessionSettingsModalProps> = ({
           items={secondaryItems}
         />
       </Form>
-    </Modal>
+    </Drawer>
   );
 };

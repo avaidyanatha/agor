@@ -1,7 +1,7 @@
 // biome-ignore-all lint/plugin/noHardcodedColorProperty: log output intentionally uses a fixed terminal-like surface
 import type { AgorClient, Branch } from '@agor-live/client';
 import { ReloadOutlined } from '@ant-design/icons';
-import { Alert, Button, Checkbox, Modal, Space, Typography, theme } from 'antd';
+import { Alert, Button, Checkbox, Drawer, Space, Typography, theme } from 'antd';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Ansi } from '../AnsiText';
 import { ErrorBoundary } from '../ErrorBoundary';
@@ -129,33 +129,32 @@ export const EnvironmentLogsModal: React.FC<EnvironmentLogsModalProps> = ({
     return date.toLocaleString();
   };
 
+  // Bottom drawer, not modal: logs read alongside the board/environment
+  // controls instead of covering them.
   return (
-    <Modal
+    <Drawer
       title={`Environment Logs - ${branch.name}`}
       open={open}
-      onCancel={onClose}
-      width={900}
-      style={{ top: 20 }}
-      footer={[
-        <Checkbox
-          key="auto-refresh"
-          checked={autoRefresh}
-          onChange={(e) => setAutoRefresh(e.target.checked)}
-        >
-          Auto-refresh
-        </Checkbox>,
-        <Button
-          key="refresh"
-          icon={<ReloadOutlined />}
-          onClick={() => fetchLogs(false, true)}
-          loading={loading}
-        >
-          Refresh
-        </Button>,
-        <Button key="close" onClick={onClose}>
-          Close
-        </Button>,
-      ]}
+      onClose={onClose}
+      placement="bottom"
+      size="65vh"
+      mask={false}
+      footer={
+        <Space>
+          <Checkbox checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)}>
+            Auto-refresh
+          </Checkbox>
+          <Button
+            icon={<ReloadOutlined />}
+            onClick={() => fetchLogs(false, true)}
+            loading={loading}
+          >
+            Refresh
+          </Button>
+          <Button onClick={onClose}>Close</Button>
+        </Space>
+      }
+      styles={{ footer: { textAlign: 'right' } }}
     >
       <ErrorBoundary fallbackTitle="Couldn't render the logs viewer." resetKey={logs?.timestamp}>
         <Space orientation="vertical" size="middle" style={{ width: '100%' }}>
@@ -205,7 +204,8 @@ export const EnvironmentLogsModal: React.FC<EnvironmentLogsModalProps> = ({
                 border: `1px solid ${token.colorBorder}`,
                 borderRadius: token.borderRadius,
                 padding: 16,
-                height: '60vh',
+                height: 'calc(65vh - 230px)',
+                minHeight: 200,
                 overflowY: 'auto',
                 fontFamily: 'monospace',
                 fontSize: 12,
@@ -225,7 +225,8 @@ export const EnvironmentLogsModal: React.FC<EnvironmentLogsModalProps> = ({
                 textAlign: 'center',
                 padding: 40,
                 color: token.colorTextSecondary,
-                height: '60vh',
+                height: 'calc(65vh - 230px)',
+                minHeight: 200,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -236,6 +237,6 @@ export const EnvironmentLogsModal: React.FC<EnvironmentLogsModalProps> = ({
           )}
         </Space>
       </ErrorBoundary>
-    </Modal>
+    </Drawer>
   );
 };
