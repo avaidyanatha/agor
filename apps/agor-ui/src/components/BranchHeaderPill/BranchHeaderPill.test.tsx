@@ -161,7 +161,8 @@ describe('BranchHeaderPill', () => {
       name: 'preset-io/agor / feature/remove-nuke',
     });
     expect(identity).toHaveAttribute('aria-haspopup', 'menu');
-    expect(identity).toHaveAttribute('data-tooltip-trigger', 'hover,focus');
+    // No hover tooltip on the identity — the pill already shows the branch name.
+    expect(identity).not.toHaveAttribute('data-tooltip-trigger');
 
     // The old inline shortcut/env buttons are gone from the pill surface.
     expect(screen.queryByRole('button', { name: 'Start environment' })).not.toBeInTheDocument();

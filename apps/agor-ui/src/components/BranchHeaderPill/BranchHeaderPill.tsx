@@ -290,7 +290,7 @@ export function BranchHeaderPill({
     }
   };
 
-  const identityTooltip = `${repo.slug} / ${branch.name}`;
+  const identityLabel = `${repo.slug} / ${branch.name}`;
 
   // --- Render ---
 
@@ -315,29 +315,27 @@ export function BranchHeaderPill({
         menu={{ items: [...tabItems, ...envActionItems], onClick: handleMenuClick }}
         trigger={['click']}
       >
-        <Tooltip title={identityTooltip} trigger={['hover', 'focus']}>
-          <button
-            type="button"
-            aria-label={identityTooltip}
-            aria-haspopup="menu"
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 4,
-              padding: compact ? '0 6px' : '0 8px',
-              cursor: 'pointer',
-              height: PILL_HEIGHT,
-              background: 'none',
-              border: 'none',
-              color: 'inherit',
-              font: 'inherit',
-              ...(truncateToFit ? { flex: '1 1 auto', minWidth: 0, overflow: 'hidden' } : {}),
-            }}
-          >
-            {identityContent}
-          </button>
-        </Tooltip>
+        <button
+          type="button"
+          aria-label={identityLabel}
+          aria-haspopup="menu"
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 4,
+            padding: compact ? '0 6px' : '0 8px',
+            cursor: 'pointer',
+            height: PILL_HEIGHT,
+            background: 'none',
+            border: 'none',
+            color: 'inherit',
+            font: 'inherit',
+            ...(truncateToFit ? { flex: '1 1 auto', minWidth: 0, overflow: 'hidden' } : {}),
+          }}
+        >
+          {identityContent}
+        </button>
       </Dropdown>
 
       {/* Section 2: Environment status chip */}
