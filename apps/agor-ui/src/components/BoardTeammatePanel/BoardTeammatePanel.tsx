@@ -1,6 +1,6 @@
 import type { AgorClient, Board, Branch, Repo, SpawnConfig, User } from '@agor-live/client';
 import { getTeammateConfig, isTeammate } from '@agor-live/client';
-import { LeftOutlined, RobotOutlined } from '@ant-design/icons';
+import { RightOutlined, RobotOutlined } from '@ant-design/icons';
 import {
   Alert,
   App as AntApp,
@@ -625,7 +625,7 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
               <Button
                 type="text"
                 size="small"
-                icon={<LeftOutlined style={{ fontSize: 11 }} />}
+                icon={<RightOutlined style={{ fontSize: 11 }} />}
                 onClick={onCollapse}
                 style={{ marginRight: 4 }}
               />

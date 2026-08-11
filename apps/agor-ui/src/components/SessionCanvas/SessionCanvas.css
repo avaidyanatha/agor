@@ -4,16 +4,29 @@
   margin-bottom: 75px;
 }
 
-/* Theme-aware React Flow controls */
+/* Theme-aware React Flow controls — horizontal floating toolbar at the
+   bottom of the board (Figma-style) */
 .react-flow__controls {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  margin-bottom: 20px;
   background: var(--ant-color-bg-elevated);
   border: 1px solid var(--ant-color-border-secondary);
+  border-radius: 12px;
 }
 
 .react-flow__controls-button {
   background: transparent;
-  border-bottom: 1px solid var(--ant-color-border-secondary);
+  border: none;
+  border-radius: 8px;
   color: var(--ant-color-text);
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
 }
 
 .react-flow__controls-button:hover {
@@ -22,6 +35,15 @@
 
 .react-flow__controls-button svg {
   fill: currentColor;
+  max-width: none;
+  max-height: none;
+}
+
+.canvas-toolbar-divider {
+  width: 1px;
+  height: 28px;
+  margin: 0 4px;
+  background: var(--ant-color-border-secondary);
 }
 
 /* Tool mode cursors - override React Flow defaults */

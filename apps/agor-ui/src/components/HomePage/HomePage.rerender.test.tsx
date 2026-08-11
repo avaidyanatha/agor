@@ -21,12 +21,6 @@ vi.mock('./HomeBoardsSection', () => ({
 vi.mock('./HomeSessionsSection', () => ({
   HomeSessionsSection: () => null,
 }));
-vi.mock('./HomeActivitySection', () => ({
-  HomeActivitySection: () => null,
-}));
-vi.mock('./HomeKnowledgeSection', () => ({
-  HomeKnowledgeSection: () => null,
-}));
 
 const board = { board_id: 'board-1', name: 'Board', slug: 'board' } as unknown as Board;
 
@@ -43,9 +37,7 @@ function renderHome() {
   return render(
     <MemoryRouter basename="/ui" initialEntries={['/ui/']}>
       <HomePage
-        client={null}
         onBoardClick={() => {}}
-        onBranchClick={() => {}}
         onSessionClick={() => {}}
         onOpenCreateDialog={() => {}}
         onOpenSettings={() => {}}
@@ -149,12 +141,9 @@ let triggerParentRerender: () => void = () => {};
 const noop = () => {};
 const EMPTY_RECENT: string[] = [];
 const STABLE_HOME_PROPS = {
-  client: null,
-  connected: true,
   recentBoardIds: EMPTY_RECENT,
   currentUserId: 'u1',
   onBoardClick: noop,
-  onBranchClick: noop,
   onOpenCreateDialog: noop,
   onOpenSettings: noop,
 } as const;

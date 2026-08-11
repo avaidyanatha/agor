@@ -2,7 +2,7 @@ import { AppstoreOutlined, BranchesOutlined, PlusOutlined, RobotOutlined } from 
 import type { MenuProps } from 'antd';
 import { Button, Dropdown, Layout, Modal, Segmented, Select, Typography, theme } from 'antd';
 import type React from 'react';
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useMemo, useState } from 'react';
 import { DEFAULT_BACKGROUNDS } from '../../constants/ui';
 import {
   type AgorState,
@@ -13,12 +13,9 @@ import {
 } from '../../store/agorStore';
 import { selectBoardById } from '../../store/selectors';
 import { isDarkTheme } from '../../utils/theme';
-import { HomeActivitySection } from './HomeActivitySection';
 import { HomeBoardsSection } from './HomeBoardsSection';
-import { HomeKnowledgeSection } from './HomeKnowledgeSection';
 import { HomeSessionsSection } from './HomeSessionsSection';
 import { HomeStatsBar } from './HomeStatsBar';
-import { glassCardStyle } from './homeStyles';
 import { JumpBackInSection } from './JumpBackInSection';
 import { OnboardingCard } from './OnboardingCard';
 import type { HomePageProps } from './types';
@@ -27,10 +24,6 @@ const { Content } = Layout;
 const { Text, Title } = Typography;
 
 const ONBOARDING_HIDDEN_KEY = 'agor:onboarding-card-hidden';
-const SIDEBAR_STORAGE_KEY = 'agor:homepage-sidebar-width';
-const SIDEBAR_DEFAULT = 340;
-const SIDEBAR_MIN = 240;
-const SIDEBAR_MAX_RATIO = 0.5;
 
 // Direct map-value iteration with an early exit — avoids materializing an array
 // of every session on each store notify just to test for one visible match.
@@ -153,79 +146,6 @@ export const HomePage = memo(function HomePage(props: HomePageProps) {
   );
   const username = currentUserName || 'there';
 
-  // Resizable sidebar
-  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
-    try {
-      const stored = Number(localStorage.getItem(SIDEBAR_STORAGE_KEY));
-      if (!Number.isFinite(stored) || stored <= 0) return SIDEBAR_DEFAULT;
-      const maxW =
-        typeof window !== 'undefined'
-          ? window.innerWidth * SIDEBAR_MAX_RATIO
-          : Number.POSITIVE_INFINITY;
-      return Math.min(Math.max(SIDEBAR_MIN, stored), Math.max(SIDEBAR_MIN, maxW));
-    } catch {
-      return SIDEBAR_DEFAULT;
-    }
-  });
-  const [sidebarVisible, setSidebarVisible] = useState(
-    () => typeof window !== 'undefined' && window.innerWidth >= 992
-  );
-  const [dragHandleHovered, setDragHandleHovered] = useState(false);
-  const isDragging = useRef(false);
-  const dragStartX = useRef(0);
-  const dragStartW = useRef(0);
-  const dragCleanupRef = useRef<(() => void) | null>(null);
-  const sidebarWidthRef = useRef(sidebarWidth);
-  sidebarWidthRef.current = sidebarWidth;
-
-  useEffect(() => {
-    const onResize = () => setSidebarVisible(window.innerWidth >= 992);
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
-
-  const handleDragStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    isDragging.current = true;
-    dragStartX.current = e.clientX;
-    dragStartW.current = sidebarWidthRef.current;
-
-    const onMove = (ev: MouseEvent) => {
-      if (!isDragging.current) return;
-      const maxW = window.innerWidth * SIDEBAR_MAX_RATIO;
-      const newW = Math.max(
-        SIDEBAR_MIN,
-        Math.min(maxW, dragStartW.current - (ev.clientX - dragStartX.current))
-      );
-      setSidebarWidth(newW);
-    };
-    function teardown() {
-      isDragging.current = false;
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      dragCleanupRef.current = null;
-    }
-    function onUp() {
-      setSidebarWidth((w) => {
-        try {
-          localStorage.setItem(SIDEBAR_STORAGE_KEY, String(Math.round(w)));
-        } catch {}
-        return w;
-      });
-      teardown();
-    }
-    dragCleanupRef.current = teardown;
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-  }, []);
-
-  // Tear down an in-progress drag if the page unmounts mid-drag.
-  useEffect(() => () => dragCleanupRef.current?.(), []);
-
   const defaultBoardId = useMemo(() => {
     const firstRecent = (props.recentBoardIds ?? []).find(
       (id) => boardById.get(id)?.archived === false
@@ -266,7 +186,7 @@ export const HomePage = memo(function HomePage(props: HomePageProps) {
   return (
     <>
       <div style={{ height: '100%', overflow: 'hidden', background: homeBackground }}>
-        <Layout hasSider style={{ height: '100%', background: 'transparent' }}>
+        <Layout style={{ height: '100%', background: 'transparent' }}>
           <Content
             style={{
               overflowY: 'auto',
@@ -359,88 +279,6 @@ export const HomePage = memo(function HomePage(props: HomePageProps) {
               </div>
             </div>
           </Content>
-
-          {/* Resizable right sidebar — hidden below 992px */}
-          {sidebarVisible && (
-            <aside
-              style={{
-                width: sidebarWidth,
-                flexShrink: 0,
-                position: 'relative',
-                borderLeft: `1px solid ${token.colorBorderSecondary}`,
-                ...glassCardStyle(token, 0.5),
-                overflow: 'hidden',
-                display: 'flex',
-                flexDirection: 'column',
-              }}
-            >
-              {/* Drag handle — biome-ignore lint/a11y/useSemanticElements: needs position:absolute full-height layout; <hr> can't serve as an interactive resize slider */}
-              {/* biome-ignore lint/a11y/useSemanticElements: interactive resize handle */}
-              <div
-                role="separator"
-                aria-orientation="vertical"
-                aria-label="Resize sidebar"
-                aria-valuenow={Math.round(sidebarWidth)}
-                aria-valuemin={SIDEBAR_MIN}
-                aria-valuemax={Math.round(
-                  typeof window !== 'undefined'
-                    ? window.innerWidth * SIDEBAR_MAX_RATIO
-                    : SIDEBAR_DEFAULT
-                )}
-                tabIndex={0}
-                onMouseDown={handleDragStart}
-                onMouseEnter={() => setDragHandleHovered(true)}
-                onMouseLeave={() => setDragHandleHovered(false)}
-                onKeyDown={(e) => {
-                  const delta = e.key === 'ArrowLeft' ? 8 : e.key === 'ArrowRight' ? -8 : 0;
-                  if (delta) {
-                    e.preventDefault();
-                    setSidebarWidth((w) => {
-                      const maxW =
-                        typeof window !== 'undefined'
-                          ? window.innerWidth * SIDEBAR_MAX_RATIO
-                          : SIDEBAR_DEFAULT;
-                      const newW = Math.max(SIDEBAR_MIN, Math.min(maxW, w + delta));
-                      try {
-                        localStorage.setItem(SIDEBAR_STORAGE_KEY, String(Math.round(newW)));
-                      } catch {}
-                      return newW;
-                    });
-                  }
-                }}
-                title="Drag or use arrow keys to resize"
-                style={{
-                  position: 'absolute',
-                  left: 0,
-                  top: 0,
-                  bottom: 0,
-                  width: 4,
-                  cursor: 'col-resize',
-                  zIndex: 10,
-                  background: dragHandleHovered ? token.colorPrimary : 'transparent',
-                  transition: 'background 0.15s',
-                }}
-              />
-              <div
-                style={{
-                  flex: 1,
-                  minHeight: 0,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  overflow: 'hidden',
-                  padding: '16px 12px 16px 16px',
-                  gap: 32,
-                }}
-              >
-                <HomeActivitySection
-                  onBoardClick={props.onBoardClick}
-                  onBranchClick={props.onBranchClick}
-                  onSessionClick={props.onSessionClick}
-                />
-                <HomeKnowledgeSection client={props.client} connected={props.connected} />
-              </div>
-            </aside>
-          )}
         </Layout>
       </div>
 

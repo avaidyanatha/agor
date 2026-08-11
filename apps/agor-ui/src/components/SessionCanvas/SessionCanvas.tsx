@@ -23,8 +23,6 @@ import {
   CommentOutlined,
   DeleteOutlined,
   FileMarkdownOutlined,
-  MinusOutlined,
-  PlusOutlined,
   SelectOutlined,
   ZoomInOutlined,
 } from '@ant-design/icons';
@@ -2652,89 +2650,51 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           >
             {!canvasBackground && <Background />}
             <Controls
-              position="top-left"
+              position="bottom-center"
               showZoom={false}
               showFitView={false}
               showInteractive={false}
+              style={{ boxShadow: token.boxShadowSecondary }}
             >
-              {/* Zoom controls */}
-              <Tooltip title="Zoom In" placement="right" mouseEnterDelay={0.3}>
+              {/* Tools — active tool gets a filled highlight, Figma-style */}
+              <Tooltip title="Select" placement="top" mouseEnterDelay={0.3}>
                 <span>
                   <ControlButton
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      reactFlowInstanceRef.current?.zoomIn();
-                    }}
-                  >
-                    <PlusOutlined style={{ fontSize: '16px' }} />
-                  </ControlButton>
-                </span>
-              </Tooltip>
-              <Tooltip title="Zoom Out" placement="right" mouseEnterDelay={0.3}>
-                <span>
-                  <ControlButton
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      reactFlowInstanceRef.current?.zoomOut();
-                    }}
-                  >
-                    <MinusOutlined style={{ fontSize: '16px' }} />
-                  </ControlButton>
-                </span>
-              </Tooltip>
-              <Tooltip title="Fit View" placement="right" mouseEnterDelay={0.3}>
-                <span>
-                  <ControlButton
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      reactFlowInstanceRef.current?.fitView();
-                    }}
-                  >
-                    <ZoomInOutlined style={{ fontSize: '16px' }} />
-                  </ControlButton>
-                </span>
-              </Tooltip>
-              {/* Custom toolbox buttons */}
-              <Tooltip title="Select" placement="right" mouseEnterDelay={0.3}>
-                <span>
-                  <ControlButton
+                    aria-label="Select"
                     onClick={(e) => {
                       e.stopPropagation();
                       setActiveTool('select');
                     }}
                     style={{
-                      borderLeft:
-                        activeTool === 'select'
-                          ? `${token.lineWidth * 3}px ${token.lineType} ${token.colorPrimary}`
-                          : 'none',
+                      background: activeTool === 'select' ? token.colorPrimary : 'transparent',
+                      color: activeTool === 'select' ? token.colorWhite : 'inherit',
                     }}
                   >
-                    <SelectOutlined style={{ fontSize: '16px' }} />
+                    <SelectOutlined style={{ fontSize: 22 }} />
                   </ControlButton>
                 </span>
               </Tooltip>
               <Tooltip
                 title={mutationGate.canMutate ? 'Add Zone' : (mutationGate.message ?? 'Add Zone')}
-                placement="right"
+                placement="top"
                 mouseEnterDelay={0.3}
               >
                 <span>
                   <ControlButton
+                    aria-label="Add Zone"
                     disabled={!mutationGate.canMutate}
                     onClick={(e) => {
                       e.stopPropagation();
                       setActiveTool('zone');
                     }}
                     style={{
-                      borderLeft:
-                        activeTool === 'zone'
-                          ? `${token.lineWidth * 3}px ${token.lineType} ${token.colorPrimary}`
-                          : 'none',
+                      background: activeTool === 'zone' ? token.colorPrimary : 'transparent',
+                      color: activeTool === 'zone' ? token.colorWhite : 'inherit',
                       opacity: mutationGate.canMutate ? 1 : 0.4,
                       cursor: mutationGate.canMutate ? 'pointer' : 'not-allowed',
                     }}
                   >
-                    <BorderOutlined style={{ fontSize: '16px' }} />
+                    <BorderOutlined style={{ fontSize: 22 }} />
                   </ControlButton>
                 </span>
               </Tooltip>
@@ -2742,26 +2702,25 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 title={
                   mutationGate.canMutate ? 'Add Comment' : (mutationGate.message ?? 'Add Comment')
                 }
-                placement="right"
+                placement="top"
                 mouseEnterDelay={0.3}
               >
                 <span>
                   <ControlButton
+                    aria-label="Add Comment"
                     disabled={!mutationGate.canMutate}
                     onClick={(e) => {
                       e.stopPropagation();
                       setActiveTool('comment');
                     }}
                     style={{
-                      borderLeft:
-                        activeTool === 'comment'
-                          ? `${token.lineWidth * 3}px ${token.lineType} ${token.colorPrimary}`
-                          : 'none',
+                      background: activeTool === 'comment' ? token.colorPrimary : 'transparent',
+                      color: activeTool === 'comment' ? token.colorWhite : 'inherit',
                       opacity: mutationGate.canMutate ? 1 : 0.4,
                       cursor: mutationGate.canMutate ? 'pointer' : 'not-allowed',
                     }}
                   >
-                    <CommentOutlined style={{ fontSize: '16px' }} />
+                    <CommentOutlined style={{ fontSize: 22 }} />
                   </ControlButton>
                 </span>
               </Tooltip>
@@ -2771,7 +2730,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                     ? 'Add Markdown Note — click canvas to place'
                     : (mutationGate.message ?? 'Add Markdown Note — click canvas to place')
                 }
-                placement="right"
+                placement="top"
                 mouseEnterDelay={0.3}
               >
                 <span>
@@ -2783,15 +2742,13 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                       setActiveTool('markdown');
                     }}
                     style={{
-                      borderLeft:
-                        activeTool === 'markdown'
-                          ? `${token.lineWidth * 3}px ${token.lineType} ${token.colorPrimary}`
-                          : 'none',
+                      background: activeTool === 'markdown' ? token.colorPrimary : 'transparent',
+                      color: activeTool === 'markdown' ? token.colorWhite : 'inherit',
                       opacity: mutationGate.canMutate ? 1 : 0.4,
                       cursor: mutationGate.canMutate ? 'pointer' : 'not-allowed',
                     }}
                   >
-                    <FileMarkdownOutlined style={{ fontSize: '16px' }} />
+                    <FileMarkdownOutlined style={{ fontSize: 22 }} />
                   </ControlButton>
                 </span>
               </Tooltip>
@@ -2801,27 +2758,39 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                     ? 'Eraser - Click to toggle'
                     : (mutationGate.message ?? 'Eraser')
                 }
-                placement="right"
+                placement="top"
                 mouseEnterDelay={0.3}
               >
                 <span>
                   <ControlButton
+                    aria-label="Eraser"
                     disabled={!mutationGate.canMutate}
                     onClick={(e) => {
                       e.stopPropagation();
                       setActiveTool(activeTool === 'eraser' ? 'select' : 'eraser');
                     }}
                     style={{
-                      borderLeft:
-                        activeTool === 'eraser' ? `3px solid ${token.colorError}` : 'none',
-                      color: activeTool === 'eraser' ? token.colorError : 'inherit',
-                      backgroundColor:
-                        activeTool === 'eraser' ? `${token.colorError}15` : 'transparent',
+                      background: activeTool === 'eraser' ? token.colorError : 'transparent',
+                      color: activeTool === 'eraser' ? token.colorWhite : 'inherit',
                       opacity: mutationGate.canMutate ? 1 : 0.4,
                       cursor: mutationGate.canMutate ? 'pointer' : 'not-allowed',
                     }}
                   >
-                    <DeleteOutlined style={{ fontSize: '16px' }} />
+                    <DeleteOutlined style={{ fontSize: 22 }} />
+                  </ControlButton>
+                </span>
+              </Tooltip>
+              <span className="canvas-toolbar-divider" />
+              <Tooltip title="Fit View" placement="top" mouseEnterDelay={0.3}>
+                <span>
+                  <ControlButton
+                    aria-label="Fit View"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      reactFlowInstanceRef.current?.fitView();
+                    }}
+                  >
+                    <ZoomInOutlined style={{ fontSize: 22 }} />
                   </ControlButton>
                 </span>
               </Tooltip>

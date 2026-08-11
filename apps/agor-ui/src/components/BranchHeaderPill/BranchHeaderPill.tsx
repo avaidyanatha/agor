@@ -1,6 +1,8 @@
 import type { Branch, Repo } from '@agor-live/client';
+import { isTeammate } from '@agor-live/client';
 import {
   ApartmentOutlined,
+  BookOutlined,
   BranchesOutlined,
   CalendarOutlined,
   EditOutlined,
@@ -8,12 +10,15 @@ import {
   FireOutlined,
   FolderOutlined,
   GlobalOutlined,
+  LinkOutlined,
   PlayCircleOutlined,
+  RobotOutlined,
   StopOutlined,
   TeamOutlined,
 } from '@ant-design/icons';
-import { Button, Tooltip, theme } from 'antd';
-import { Link } from 'react-router-dom';
+import type { MenuProps } from 'antd';
+import { Dropdown, Tooltip, theme } from 'antd';
+import { useNavigate } from 'react-router-dom';
 import { useConfirmNukeEnvironment } from '../../hooks/useConfirmNukeEnvironment';
 import { getEffectiveEnv } from '../../utils/environmentConfig';
 import { getEnvironmentState } from '../../utils/environmentState';
@@ -33,7 +38,7 @@ interface BranchHeaderPillProps {
   onViewLogs?: (branchId: string) => void;
   canControlEnvironment?: boolean;
   connectionDisabled?: boolean;
-  /** Show environment status/controls and environment shortcut. Defaults to true. */
+  /** Show the environment status chip. Defaults to true. */
   showEnvButtons?: boolean;
   /** Whether to show the destructive Nuke action when available. Defaults to true. */
   showNukeEnvironment?: boolean;
@@ -49,27 +54,6 @@ interface BranchHeaderPillProps {
 }
 
 const PILL_HEIGHT = 22;
-const ACTION_BUTTON_HEIGHT = 22;
-const DEFAULT_ACTION_BUTTON_WIDTH = 22;
-
-const DEFAULT_ACTION_BUTTON_STYLE: React.CSSProperties = {
-  height: ACTION_BUTTON_HEIGHT,
-  width: DEFAULT_ACTION_BUTTON_WIDTH,
-  minWidth: DEFAULT_ACTION_BUTTON_WIDTH,
-  padding: 0,
-};
-
-// The configured environment and shortcut sections cannot shrink. Reclaim two
-// pixels per action only in the constrained, non-compact truncateToFit layout
-// so the complete action row fits before identity text collapses to its
-// ellipsis.
-const NARROW_ACTION_BUTTON_WIDTH = 20;
-const NARROW_ACTION_BUTTON_STYLE: React.CSSProperties = {
-  height: ACTION_BUTTON_HEIGHT,
-  width: NARROW_ACTION_BUTTON_WIDTH,
-  minWidth: NARROW_ACTION_BUTTON_WIDTH,
-  padding: 0,
-};
 
 export function BranchHeaderPill({
   repo,
@@ -89,6 +73,7 @@ export function BranchHeaderPill({
   compact = false,
 }: BranchHeaderPillProps) {
   const { token } = theme.useToken();
+  const navigate = useNavigate();
   const confirmNuke = useConfirmNukeEnvironment();
   const effectiveEnv = getEffectiveEnv(repo);
   const hasConfig = effectiveEnv.hasConfig;
@@ -108,11 +93,6 @@ export function BranchHeaderPill({
   // `others_can`: group grants are not present on this branch payload, and the
   // daemon is the source of truth for environment authorization.
   const resolvedCanControlEnvironment = canControlEnvironment ?? true;
-  const controlDisabledTooltip = resolvedCanControlEnvironment
-    ? undefined
-    : "Requires branch 'all' permission or admin access";
-  const actionButtonStyle =
-    truncateToFit && !compact ? NARROW_ACTION_BUTTON_STYLE : DEFAULT_ACTION_BUTTON_STYLE;
 
   const status = env?.status || 'stopped';
   const isRunning = status === 'running';
@@ -134,15 +114,6 @@ export function BranchHeaderPill({
     !onStopEnvironment ||
     isStopping ||
     !canStop;
-
-  const openTab = (tab: BranchModalTab) => (e: React.MouseEvent) => {
-    e.stopPropagation();
-    onOpenBranch?.(branch.branch_id, tab);
-  };
-
-  const openModal = () => {
-    onOpenBranch?.(branch.branch_id);
-  };
 
   const identityContent = (
     <>
@@ -214,19 +185,112 @@ export function BranchHeaderPill({
     }
   };
 
-  const identityTooltip = `${repo.slug} / ${branch.name} · ${identityLink ? 'Open session' : 'Open branch settings'}`;
-  const identityLinkStyle: React.CSSProperties = {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 4,
-    padding: compact ? '0 6px' : '0 8px',
-    cursor: 'pointer',
-    height: PILL_HEIGHT,
-    color: 'inherit',
-    textDecoration: 'none',
-    ...(truncateToFit ? { flex: '1 1 auto', minWidth: 0, overflow: 'hidden' } : {}),
+  const openTab = (tab?: BranchModalTab) => onOpenBranch?.(branch.branch_id, tab);
+
+  // --- Branch menu ---
+
+  const tabItems: MenuProps['items'] = [
+    ...(identityLink
+      ? [
+          { key: 'open-link', label: 'Open session', icon: <LinkOutlined /> },
+          { type: 'divider' as const },
+        ]
+      : []),
+    { key: 'tab:general', label: 'General', icon: <EditOutlined /> },
+    ...(isTeammate(branch)
+      ? [{ key: 'tab:teammate', label: 'Teammate', icon: <RobotOutlined /> }]
+      : []),
+    {
+      key: 'tab:sessions',
+      label: `Sessions${sessionCount != null ? ` (${sessionCount})` : ''}`,
+      icon: <TeamOutlined />,
+    },
+    { key: 'tab:environment', label: 'Environment', icon: <GlobalOutlined /> },
+    { key: 'tab:files', label: 'Files', icon: <FolderOutlined /> },
+    { key: 'tab:schedule', label: 'Schedule', icon: <CalendarOutlined /> },
+    { key: 'tab:knowledge', label: 'Knowledge', icon: <BookOutlined /> },
+  ];
+
+  const envActionItems: MenuProps['items'] =
+    showEnvButtons && hasConfig
+      ? [
+          { type: 'divider' as const },
+          ...(onStartEnvironment
+            ? [
+                {
+                  key: 'env:start',
+                  label: 'Start environment',
+                  icon: <PlayCircleOutlined />,
+                  disabled: startDisabled,
+                },
+              ]
+            : []),
+          ...(onStopEnvironment
+            ? [
+                {
+                  key: 'env:stop',
+                  label: isStarting ? 'Cancel startup' : 'Stop environment',
+                  icon: <StopOutlined />,
+                  disabled: stopDisabled,
+                },
+              ]
+            : []),
+          ...(onViewLogs && effectiveEnv.logs
+            ? [
+                {
+                  key: 'env:logs',
+                  label: 'View logs',
+                  icon: <FileTextOutlined />,
+                  disabled: !resolvedCanControlEnvironment,
+                },
+              ]
+            : []),
+          ...(showNukeEnvironment && !compact && onNukeEnvironment && branch.nuke_command
+            ? [
+                {
+                  key: 'env:nuke',
+                  label: 'Nuke environment',
+                  icon: <FireOutlined />,
+                  danger: true,
+                  disabled: connectionDisabled || !resolvedCanControlEnvironment,
+                },
+              ]
+            : []),
+        ]
+      : [];
+
+  const handleMenuClick: MenuProps['onClick'] = ({ key, domEvent }) => {
+    domEvent.stopPropagation();
+    if (key === 'open-link' && identityLink) {
+      if (identityLink.startsWith('/')) {
+        navigate(identityLink);
+      } else {
+        window.location.assign(identityLink);
+      }
+      return;
+    }
+    if (key.startsWith('tab:')) {
+      const tab = key.slice('tab:'.length) as BranchModalTab;
+      openTab(tab === 'general' ? undefined : tab);
+      return;
+    }
+    switch (key) {
+      case 'env:start':
+        onStartEnvironment?.(branch.branch_id);
+        break;
+      case 'env:stop':
+        onStopEnvironment?.(branch.branch_id);
+        break;
+      case 'env:logs':
+        onViewLogs?.(branch.branch_id);
+        break;
+      case 'env:nuke':
+        confirmNuke(() => onNukeEnvironment?.(branch.branch_id));
+        break;
+    }
   };
-  const isInternalIdentityLink = identityLink?.startsWith('/');
+
+  const identityTooltip = `${repo.slug} / ${branch.name}`;
 
   // --- Render ---
 
@@ -246,31 +310,17 @@ export function BranchHeaderPill({
         ...(truncateToFit ? { maxWidth: '100%', minWidth: 0 } : {}),
       }}
     >
-      {/* Section 1: Repo + Branch — click opens either the supplied identity URL or the branch modal. */}
-      <Tooltip title={identityTooltip} trigger={['hover', 'focus']}>
-        {identityLink && isInternalIdentityLink ? (
-          <Link
-            to={identityLink}
-            aria-label={identityTooltip}
-            onClick={(e) => e.stopPropagation()}
-            style={identityLinkStyle}
-          >
-            {identityContent}
-          </Link>
-        ) : identityLink ? (
-          <a
-            href={identityLink}
-            aria-label={identityTooltip}
-            onClick={(e) => e.stopPropagation()}
-            style={identityLinkStyle}
-          >
-            {identityContent}
-          </a>
-        ) : (
+      {/* Section 1: Repo + Branch — click opens the branch menu */}
+      <Dropdown
+        menu={{ items: [...tabItems, ...envActionItems], onClick: handleMenuClick }}
+        trigger={['click']}
+      >
+        <Tooltip title={identityTooltip} trigger={['hover', 'focus']}>
           <button
             type="button"
             aria-label={identityTooltip}
-            onClick={openModal}
+            aria-haspopup="menu"
+            onClick={(e) => e.stopPropagation()}
             style={{
               display: 'inline-flex',
               alignItems: 'center',
@@ -287,10 +337,10 @@ export function BranchHeaderPill({
           >
             {identityContent}
           </button>
-        )}
-      </Tooltip>
+        </Tooltip>
+      </Dropdown>
 
-      {/* Section 2: Environment status + controls */}
+      {/* Section 2: Environment status chip */}
       {showEnvButtons && (
         <div
           style={{
@@ -303,153 +353,58 @@ export function BranchHeaderPill({
             flexShrink: 0,
           }}
         >
-          {hasConfig ? (
-            <>
-              {/* Env label — clickable to env URL when running, otherwise opens env tab */}
-              {isRunning && environmentUrl ? (
-                <Tooltip title={`${variantPrefix}Open ${environmentUrl}`}>
-                  <a
-                    href={environmentUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    onClick={(e) => e.stopPropagation()}
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 3,
-                      color: 'inherit',
-                      textDecoration: 'none',
-                      padding: '0 2px',
-                    }}
-                  >
-                    <EnvironmentStatusIcon state={inferredState} size={11} />
-                    <span style={{ fontFamily: token.fontFamilyCode, fontSize: 11 }}>
-                      {envLabel}
-                    </span>
-                  </a>
-                </Tooltip>
-              ) : (
-                <Tooltip title={`${variantPrefix}${getEnvTooltip()}`}>
-                  <button
-                    type="button"
-                    onClick={openTab('environment')}
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 3,
-                      cursor: 'pointer',
-                      padding: '0 2px',
-                      background: 'none',
-                      border: 'none',
-                      color: 'inherit',
-                      font: 'inherit',
-                    }}
-                  >
-                    <EnvironmentStatusIcon state={inferredState} size={11} />
-                    <span style={{ fontFamily: token.fontFamilyCode, fontSize: 11 }}>
-                      {envLabel}
-                    </span>
-                  </button>
-                </Tooltip>
-              )}
-
-              {/* Play button */}
-              {onStartEnvironment && (
-                <Tooltip
-                  title={
-                    controlDisabledTooltip ??
-                    (isRunning ? 'Environment running' : 'Start environment')
-                  }
-                >
-                  <Button
-                    type="text"
-                    size="small"
-                    aria-label="Start environment"
-                    icon={<PlayCircleOutlined />}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (!startDisabled) onStartEnvironment(branch.branch_id);
-                    }}
-                    disabled={startDisabled}
-                    style={actionButtonStyle}
-                  />
-                </Tooltip>
-              )}
-
-              {/* Stop button */}
-              {onStopEnvironment && (
-                <Tooltip
-                  title={
-                    controlDisabledTooltip ??
-                    (isRunning
-                      ? 'Stop environment'
-                      : isStarting
-                        ? 'Cancel startup'
-                        : isStopping
-                          ? 'Stopping...'
-                          : 'Not running')
-                  }
-                >
-                  <Button
-                    type="text"
-                    size="small"
-                    aria-label="Stop environment"
-                    icon={<StopOutlined />}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (!stopDisabled) onStopEnvironment(branch.branch_id);
-                    }}
-                    disabled={stopDisabled}
-                    style={actionButtonStyle}
-                  />
-                </Tooltip>
-              )}
-
-              {/* Logs button */}
-              {onViewLogs && effectiveEnv.logs && (
-                <Tooltip title={controlDisabledTooltip ?? 'View logs'}>
-                  <Button
-                    type="text"
-                    size="small"
-                    aria-label="View environment logs"
-                    icon={<FileTextOutlined />}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (resolvedCanControlEnvironment) onViewLogs(branch.branch_id);
-                    }}
-                    disabled={!resolvedCanControlEnvironment}
-                    style={actionButtonStyle}
-                  />
-                </Tooltip>
-              )}
-
-              {/* Nuke button */}
-              {showNukeEnvironment && !compact && onNukeEnvironment && branch.nuke_command && (
-                <Tooltip title={controlDisabledTooltip ?? 'Nuke environment (destructive)'}>
-                  <Button
-                    type="text"
-                    size="small"
-                    danger
-                    aria-label="Nuke environment"
-                    icon={<FireOutlined />}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (resolvedCanControlEnvironment && !connectionDisabled) {
-                        confirmNuke(() => onNukeEnvironment(branch.branch_id));
-                      }
-                    }}
-                    disabled={connectionDisabled || !resolvedCanControlEnvironment}
-                    style={actionButtonStyle}
-                  />
-                </Tooltip>
-              )}
-            </>
+          {hasConfig && isRunning && environmentUrl ? (
+            <Tooltip title={`${variantPrefix}Open ${environmentUrl}`}>
+              <a
+                href={environmentUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 3,
+                  color: 'inherit',
+                  textDecoration: 'none',
+                  padding: '0 2px',
+                }}
+              >
+                <EnvironmentStatusIcon state={inferredState} size={11} />
+                <span style={{ fontFamily: token.fontFamilyCode, fontSize: 11 }}>{envLabel}</span>
+              </a>
+            </Tooltip>
+          ) : hasConfig ? (
+            <Tooltip title={`${variantPrefix}${getEnvTooltip()}`}>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openTab('environment');
+                }}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 3,
+                  cursor: 'pointer',
+                  padding: '0 2px',
+                  background: 'none',
+                  border: 'none',
+                  color: 'inherit',
+                  font: 'inherit',
+                }}
+              >
+                <EnvironmentStatusIcon state={inferredState} size={11} />
+                <span style={{ fontFamily: token.fontFamilyCode, fontSize: 11 }}>{envLabel}</span>
+              </button>
+            </Tooltip>
           ) : (
-            /* No env config — show dim env label with edit icon */
             <Tooltip title="Configure environment">
               <button
                 type="button"
-                onClick={openTab('environment')}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openTab('environment');
+                }}
                 style={{
                   display: 'inline-flex',
                   alignItems: 'center',
@@ -470,63 +425,6 @@ export function BranchHeaderPill({
           )}
         </div>
       )}
-
-      {/* Section 3: Tab shortcut icons */}
-      <div
-        style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: 1,
-          padding: '0 3px',
-          height: PILL_HEIGHT,
-          borderLeft: `1px solid ${token.colorBorderSecondary}`,
-          flexShrink: 0,
-        }}
-      >
-        <Tooltip title={`Sessions${sessionCount != null ? ` (${sessionCount})` : ''}`}>
-          <Button
-            type="text"
-            size="small"
-            aria-label="Sessions"
-            icon={<TeamOutlined />}
-            onClick={openTab('sessions')}
-            style={actionButtonStyle}
-          />
-        </Tooltip>
-        <Tooltip title="Files">
-          <Button
-            type="text"
-            size="small"
-            aria-label="Files"
-            icon={<FolderOutlined />}
-            onClick={openTab('files')}
-            style={actionButtonStyle}
-          />
-        </Tooltip>
-        <Tooltip title="Schedule">
-          <Button
-            type="text"
-            size="small"
-            aria-label="Schedule"
-            icon={<CalendarOutlined />}
-            onClick={openTab('schedule')}
-            style={actionButtonStyle}
-          />
-        </Tooltip>
-        <Tooltip title="Edit branch">
-          <Button
-            type="text"
-            size="small"
-            aria-label="Edit branch"
-            icon={<EditOutlined />}
-            onClick={(e) => {
-              e.stopPropagation();
-              openModal();
-            }}
-            style={actionButtonStyle}
-          />
-        </Tooltip>
-      </div>
     </Tag>
   );
 }

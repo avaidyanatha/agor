@@ -255,7 +255,7 @@ const EMPTY_STRING_ARRAY: string[] = Object.freeze([] as string[]) as string[];
 const EMPTY_BOARDS: Board[] = Object.freeze([] as Board[]) as Board[];
 const EMPTY_SESSIONS: Session[] = Object.freeze([] as Session[]) as Session[];
 
-// 320px keeps the three left-panel tabs (Teammate / All sessions / Comments)
+// 320px keeps the three side-panel tabs (Teammate / All sessions / Comments)
 // on one readable line with Ant's tab padding at the 768px desktop breakpoint.
 const LEFT_PANEL_MIN_WIDTH_PX = 320;
 const LEFT_PANEL_MAX_SIZE_PERCENT = 45;
@@ -713,11 +713,6 @@ export const App: React.FC<AppProps> = ({
 
   const handleHomeBoardClick = useCallback(
     (boardId: string) => navigation.goToBoard(boardId),
-    [navigation]
-  );
-
-  const handleHomeBranchClick = useCallback(
-    (branchId: string) => navigation.goToBranch(branchId),
     [navigation]
   );
 
@@ -1460,105 +1455,18 @@ export const App: React.FC<AppProps> = ({
               // Persist only user drag updates. Programmatic resizing enforces
               // the responsive minimum without clobbering the user's desired size.
               if (!leftPanelCollapsed && leftPanelResizeDraggingRef.current && sizes.length >= 2) {
-                // Comments panel is the first panel (index 0)
+                // Teammate/comments panel is the last panel (right side)
                 setCommentsPanelSize(
-                  clampPercent(sizes[0], leftPanelMinSize, LEFT_PANEL_MAX_SIZE_PERCENT)
+                  clampPercent(
+                    sizes[sizes.length - 1],
+                    leftPanelMinSize,
+                    LEFT_PANEL_MAX_SIZE_PERCENT
+                  )
                 );
               }
             }}
           >
-            <Panel
-              id="teammate-panel"
-              order={1}
-              ref={commentsPanelRef}
-              collapsible
-              defaultSize={leftPanelCollapsed ? leftPanelCollapsedSize : effectiveCommentsPanelSize}
-              collapsedSize={leftPanelCollapsedSize}
-              minSize={leftPanelCollapsed ? leftPanelCollapsedSize : leftPanelMinSize}
-              maxSize={LEFT_PANEL_MAX_SIZE_PERCENT}
-              style={{
-                minWidth: leftPanelCollapsed
-                  ? leftPanelRailVisible
-                    ? LEFT_PANEL_RAIL_WIDTH_PX
-                    : 0
-                  : LEFT_PANEL_MIN_WIDTH_PX,
-              }}
-            >
-              {leftPanelCollapsed ? (
-                leftPanelRailVisible && (
-                  <TeammatePanelRail
-                    onSelectTab={handleSelectTeammatePanelTab}
-                    unreadCommentsCount={unreadCommentsCount}
-                    hasUserMentions={hasUserMentions}
-                  />
-                )
-              ) : (
-                <BoardTeammatePanel
-                  client={client}
-                  board={currentBoard || null}
-                  activeTab={leftPanelTab}
-                  onTabChange={setLeftPanelTab}
-                  unreadCommentsCount={unreadCommentsCount}
-                  hasUserMentions={hasUserMentions}
-                  primaryTeammateBranch={primaryTeammateBranch}
-                  primaryTeammateRepo={primaryTeammateRepo}
-                  primaryTeammateInaccessible={primaryTeammateInaccessible}
-                  currentUserId={user?.user_id}
-                  selectedSessionId={effectiveSelectedSessionId}
-                  onSessionClick={handleSessionClick}
-                  onCreateSession={handleQuickStartSession}
-                  onForkSession={stableOnForkSession}
-                  onSpawnSession={stableOnSpawnSession}
-                  onArchiveOrDelete={stableOnArchiveOrDeleteBranch}
-                  onOpenSettings={handleOpenBranchModal}
-                  onOpenSessionSettings={setSessionSettingsId}
-                  onOpenTerminal={canOpenTerminal ? handleOpenTerminal : undefined}
-                  onStartEnvironment={stableOnStartEnvironment}
-                  onStopEnvironment={stableOnStopEnvironment}
-                  onViewLogs={setLogsModalBranchId}
-                  onNukeEnvironment={stableOnNukeEnvironment}
-                  onExecuteScheduleNow={stableOnExecuteScheduleNow}
-                  onSendComment={handleTeammateSendComment}
-                  onReplyComment={stableOnReplyComment}
-                  onResolveComment={stableOnResolveComment}
-                  onToggleReaction={stableOnToggleReaction}
-                  onDeleteComment={stableOnDeleteComment}
-                  hoveredCommentId={hoveredCommentId}
-                  selectedCommentId={selectedCommentId}
-                  onCollapse={handleTeammateCollapse}
-                  deferSessionDetails={homeExitPanelDetailsDeferred}
-                  onDeferredDetailsHydrated={handleDeferredDetailsHydrated}
-                />
-              )}
-            </Panel>
-            <PanelResizeHandle
-              style={{
-                position: 'relative',
-                width: leftPanelCollapsed ? '0px' : '4px',
-                background: token.colorBorderSecondary,
-                cursor: leftPanelCollapsed ? 'default' : 'col-resize',
-                transition: 'background 0.2s',
-                pointerEvents: leftPanelCollapsed ? 'none' : 'auto',
-                overflow: 'visible',
-                zIndex: 10,
-              }}
-              onDragging={(isDragging) => {
-                leftPanelResizeDraggingRef.current = isDragging;
-              }}
-              onMouseEnter={(e) => {
-                if (!leftPanelCollapsed) {
-                  (e.currentTarget as unknown as HTMLDivElement).style.background =
-                    token.colorPrimary;
-                }
-              }}
-              onMouseLeave={(e) => {
-                if (!leftPanelCollapsed) {
-                  (e.currentTarget as unknown as HTMLDivElement).style.background =
-                    token.colorBorderSecondary;
-                }
-              }}
-            />
-            <Panel id="content-panel" order={2} defaultSize={contentPanelWidthPercent} minSize={40}>
+            <Panel id="content-panel" order={1} defaultSize={contentPanelWidthPercent} minSize={40}>
               <PanelGroup
                 id="canvas-session"
                 direction="horizontal"
@@ -1598,12 +1506,9 @@ export const App: React.FC<AppProps> = ({
                   <div style={{ position: 'relative', overflow: 'hidden', height: '100%' }}>
                     {isHomeSurface ? (
                       <HomePage
-                        client={client}
-                        connected={connected}
                         recentBoardIds={recentBoardIds}
                         currentUserId={user?.user_id}
                         onBoardClick={handleHomeBoardClick}
-                        onBranchClick={handleHomeBranchClick}
                         onSessionClick={handleSessionClick}
                         onOpenCreateDialog={handleHomeOpenCreateDialog}
                         onOpenSettings={openSettings}
@@ -1722,6 +1627,97 @@ export const App: React.FC<AppProps> = ({
                   </>
                 )}
               </PanelGroup>
+            </Panel>
+            <PanelResizeHandle
+              style={{
+                position: 'relative',
+                width: leftPanelCollapsed ? '0px' : '4px',
+                background: token.colorBorderSecondary,
+                cursor: leftPanelCollapsed ? 'default' : 'col-resize',
+                transition: 'background 0.2s',
+                pointerEvents: leftPanelCollapsed ? 'none' : 'auto',
+                overflow: 'visible',
+                zIndex: 10,
+              }}
+              onDragging={(isDragging) => {
+                leftPanelResizeDraggingRef.current = isDragging;
+              }}
+              onMouseEnter={(e) => {
+                if (!leftPanelCollapsed) {
+                  (e.currentTarget as unknown as HTMLDivElement).style.background =
+                    token.colorPrimary;
+                }
+              }}
+              onMouseLeave={(e) => {
+                if (!leftPanelCollapsed) {
+                  (e.currentTarget as unknown as HTMLDivElement).style.background =
+                    token.colorBorderSecondary;
+                }
+              }}
+            />
+            <Panel
+              id="teammate-panel"
+              order={2}
+              ref={commentsPanelRef}
+              collapsible
+              defaultSize={leftPanelCollapsed ? leftPanelCollapsedSize : effectiveCommentsPanelSize}
+              collapsedSize={leftPanelCollapsedSize}
+              minSize={leftPanelCollapsed ? leftPanelCollapsedSize : leftPanelMinSize}
+              maxSize={LEFT_PANEL_MAX_SIZE_PERCENT}
+              style={{
+                minWidth: leftPanelCollapsed
+                  ? leftPanelRailVisible
+                    ? LEFT_PANEL_RAIL_WIDTH_PX
+                    : 0
+                  : LEFT_PANEL_MIN_WIDTH_PX,
+              }}
+            >
+              {leftPanelCollapsed ? (
+                leftPanelRailVisible && (
+                  <TeammatePanelRail
+                    onSelectTab={handleSelectTeammatePanelTab}
+                    unreadCommentsCount={unreadCommentsCount}
+                    hasUserMentions={hasUserMentions}
+                  />
+                )
+              ) : (
+                <BoardTeammatePanel
+                  client={client}
+                  board={currentBoard || null}
+                  activeTab={leftPanelTab}
+                  onTabChange={setLeftPanelTab}
+                  unreadCommentsCount={unreadCommentsCount}
+                  hasUserMentions={hasUserMentions}
+                  primaryTeammateBranch={primaryTeammateBranch}
+                  primaryTeammateRepo={primaryTeammateRepo}
+                  primaryTeammateInaccessible={primaryTeammateInaccessible}
+                  currentUserId={user?.user_id}
+                  selectedSessionId={effectiveSelectedSessionId}
+                  onSessionClick={handleSessionClick}
+                  onCreateSession={handleQuickStartSession}
+                  onForkSession={stableOnForkSession}
+                  onSpawnSession={stableOnSpawnSession}
+                  onArchiveOrDelete={stableOnArchiveOrDeleteBranch}
+                  onOpenSettings={handleOpenBranchModal}
+                  onOpenSessionSettings={setSessionSettingsId}
+                  onOpenTerminal={canOpenTerminal ? handleOpenTerminal : undefined}
+                  onStartEnvironment={stableOnStartEnvironment}
+                  onStopEnvironment={stableOnStopEnvironment}
+                  onViewLogs={setLogsModalBranchId}
+                  onNukeEnvironment={stableOnNukeEnvironment}
+                  onExecuteScheduleNow={stableOnExecuteScheduleNow}
+                  onSendComment={handleTeammateSendComment}
+                  onReplyComment={stableOnReplyComment}
+                  onResolveComment={stableOnResolveComment}
+                  onToggleReaction={stableOnToggleReaction}
+                  onDeleteComment={stableOnDeleteComment}
+                  hoveredCommentId={hoveredCommentId}
+                  selectedCommentId={selectedCommentId}
+                  onCollapse={handleTeammateCollapse}
+                  deferSessionDetails={homeExitPanelDetailsDeferred}
+                  onDeferredDetailsHydrated={handleDeferredDetailsHydrated}
+                />
+              )}
             </Panel>
           </PanelGroup>
         </Content>

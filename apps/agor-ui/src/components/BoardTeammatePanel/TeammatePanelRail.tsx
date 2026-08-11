@@ -49,7 +49,7 @@ const TeammatePanelRailComponent: React.FC<TeammatePanelRailProps> = ({
         gap: 4,
         paddingTop: 12,
         background: token.colorBgContainer,
-        borderRight: `1px solid ${token.colorBorderSecondary}`,
+        borderLeft: `1px solid ${token.colorBorderSecondary}`,
       }}
     >
       {RAIL_ITEMS.map((item) => {
