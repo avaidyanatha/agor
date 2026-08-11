@@ -12,8 +12,8 @@
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 4px;
-  padding: 6px;
+  gap: 3px;
+  padding: 4px;
   margin-bottom: 20px;
   background: var(--ant-color-bg-elevated);
   border: 1px solid var(--ant-color-border-secondary);
@@ -25,10 +25,10 @@
   border: none;
   border-radius: 8px;
   color: var(--ant-color-text);
-  width: 44px;
-  height: 44px;
-  min-width: 44px;
-  min-height: 44px;
+  width: 33px;
+  height: 33px;
+  min-width: 33px;
+  min-height: 33px;
 }
 
 .react-flow__controls-button:hover {
@@ -43,7 +43,7 @@
 
 .canvas-toolbar-divider {
   width: 1px;
-  height: 28px;
+  height: 21px;
   margin: 0 4px;
   background: var(--ant-color-border-secondary);
 }

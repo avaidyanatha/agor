@@ -2681,7 +2681,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                       color: activeTool === 'select' ? token.colorWhite : 'inherit',
                     }}
                   >
-                    <SelectOutlined style={{ fontSize: 22 }} />
+                    <SelectOutlined style={{ fontSize: 17 }} />
                   </ControlButton>
                 </span>
               </Tooltip>
@@ -2705,7 +2705,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                       cursor: mutationGate.canMutate ? 'pointer' : 'not-allowed',
                     }}
                   >
-                    <BorderOutlined style={{ fontSize: 22 }} />
+                    <BorderOutlined style={{ fontSize: 17 }} />
                   </ControlButton>
                 </span>
               </Tooltip>
@@ -2731,7 +2731,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                       cursor: mutationGate.canMutate ? 'pointer' : 'not-allowed',
                     }}
                   >
-                    <CommentOutlined style={{ fontSize: 22 }} />
+                    <CommentOutlined style={{ fontSize: 17 }} />
                   </ControlButton>
                 </span>
               </Tooltip>
@@ -2759,7 +2759,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                       cursor: mutationGate.canMutate ? 'pointer' : 'not-allowed',
                     }}
                   >
-                    <FileMarkdownOutlined style={{ fontSize: 22 }} />
+                    <FileMarkdownOutlined style={{ fontSize: 17 }} />
                   </ControlButton>
                 </span>
               </Tooltip>
@@ -2787,7 +2787,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                       cursor: mutationGate.canMutate ? 'pointer' : 'not-allowed',
                     }}
                   >
-                    <DeleteOutlined style={{ fontSize: 22 }} />
+                    <DeleteOutlined style={{ fontSize: 17 }} />
                   </ControlButton>
                 </span>
               </Tooltip>
@@ -2801,7 +2801,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                       reactFlowInstanceRef.current?.fitView();
                     }}
                   >
-                    <ZoomInOutlined style={{ fontSize: 22 }} />
+                    <ZoomInOutlined style={{ fontSize: 17 }} />
                   </ControlButton>
                 </span>
               </Tooltip>
@@ -2821,7 +2821,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                       background: miniMapVisible ? token.colorFillSecondary : 'transparent',
                     }}
                   >
-                    <CompassOutlined style={{ fontSize: 22 }} />
+                    <CompassOutlined style={{ fontSize: 17 }} />
                   </ControlButton>
                 </span>
               </Tooltip>
