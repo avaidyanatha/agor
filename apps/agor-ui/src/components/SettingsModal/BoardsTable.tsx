@@ -230,13 +230,6 @@ export const BoardsTable: React.FC<BoardsTableProps> = ({
 
   const columns = [
     {
-      title: 'Icon',
-      dataIndex: 'icon',
-      key: 'icon',
-      width: 80,
-      render: (icon: string) => <span style={{ fontSize: 24 }}>{icon || '📋'}</span>,
-    },
-    {
       title: 'Name',
       dataIndex: 'name',
       key: 'name',

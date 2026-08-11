@@ -1,5 +1,5 @@
 import type { AgorClient, Branch, Session, SpawnConfig, Task } from '@agor-live/client';
-import { getTeammateConfig, isTeammate, sessionPath } from '@agor-live/client';
+import { sessionPath } from '@agor-live/client';
 import {
   CopyOutlined,
   DeleteOutlined,
@@ -182,9 +182,6 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
           scheduledRunAt={session.scheduled_run_at}
           isActive={isOpen}
           genealogy={session.genealogy}
-          teammateEmoji={
-            branch && isTeammate(branch) ? getTeammateConfig(branch)?.emoji : undefined
-          }
           forceExpandAll={forceExpandAll}
           onOpenAgenticToolSettings={onOpenAgenticToolSettings}
         />

@@ -126,7 +126,6 @@ export interface ConversationViewProps {
   /**
    * Emoji override for teammate avatar in message bubbles
    */
-  teammateEmoji?: string;
 
   /**
    * When true, all task blocks are force-expanded (used by in-session search)
@@ -152,7 +151,6 @@ export const ConversationView = React.memo<ConversationViewProps>(
     emptyStateMessage = 'No messages yet. Send a prompt to start the conversation.',
     isActive = true,
     genealogy,
-    teammateEmoji,
     forceExpandAll = false,
     onOpenAgenticToolSettings,
   }) => {
@@ -503,7 +501,6 @@ export const ConversationView = React.memo<ConversationViewProps>(
               taskMessagesLoaded={!!currentReactiveState?.loadedTaskIds.has(task.task_id)}
               onLoadTaskMessages={handleLoadTaskMessages}
               onUnloadTaskMessages={handleUnloadTaskMessages}
-              teammateEmoji={teammateEmoji}
               isLatestTask={taskIndex === tasks.length - 1}
               client={client}
               onOpenAgenticToolSettings={onOpenAgenticToolSettings}

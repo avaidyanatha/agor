@@ -7,23 +7,20 @@ import {
 
 describe('buildTeammateBootstrapPrompt', () => {
   it('uses onboarding terminology for the visible first-session title', () => {
-    expect(buildTeammateOnboardingSessionTitle({ displayName: 'Rusty', emoji: '🤖' })).toBe(
-      '🤖 Rusty onboarding'
-    );
+    expect(buildTeammateOnboardingSessionTitle({ displayName: 'Rusty' })).toBe('Rusty onboarding');
     expect(buildTeammateOnboardingSessionTitle({ displayName: 'Rusty' })).toBe('Rusty onboarding');
   });
 
   it('formats teammate identity params without browser-side Handlebars rendering', () => {
     const prompt = buildTeammateBootstrapPrompt({
       displayName: 'PR Reviewer',
-      emoji: '🧐',
       description: 'Reviews pull requests',
       userName: 'Max',
       userEmail: 'max@example.com',
     });
 
     expect(prompt).toContain('### First-session onboarding instructions for Agor AI teammate');
-    expect(prompt).toContain('- AI teammate: PR Reviewer 🧐');
+    expect(prompt).toContain('- AI teammate: PR Reviewer');
     expect(prompt).toContain('- AI teammate description: Reviews pull requests');
     expect(prompt).toContain('- User: Max <max@example.com>');
     expect(prompt).toContain(
@@ -35,21 +32,20 @@ describe('buildTeammateBootstrapPrompt', () => {
   });
 
   it('normalizes fallback identity values in the prompt context', () => {
-    const context = buildTeammateBootstrapPromptContext({ displayName: '  ', emoji: null });
+    const context = buildTeammateBootstrapPromptContext({ displayName: '  ' });
 
     expect(context).toEqual({
       teammate: {
         displayName: 'My Teammate',
-        emoji: '🤖',
       },
       firstSession: true,
     });
   });
 
   it('omits optional user and description lines when absent', () => {
-    const prompt = buildTeammateBootstrapPrompt({ displayName: 'Board Bot', emoji: '🧭' });
+    const prompt = buildTeammateBootstrapPrompt({ displayName: 'Board Bot' });
 
-    expect(prompt).toContain('- AI teammate: Board Bot 🧭');
+    expect(prompt).toContain('- AI teammate: Board Bot');
     expect(prompt).not.toContain('AI teammate description:');
     expect(prompt).not.toContain('- User:');
     expect(prompt).not.toContain('- User email:');

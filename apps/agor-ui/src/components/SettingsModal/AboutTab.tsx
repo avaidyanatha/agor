@@ -180,7 +180,7 @@ export const AboutTab: React.FC<AboutTabProps> = ({
                   <code>{capturedSha}</code>
                   {isOutOfSync(capturedSha, healthInfo?.buildSha) && (
                     <Typography.Text type="warning" style={{ marginLeft: 8 }}>
-                      ⚠️ out of sync — refresh to load the latest UI
+                      Out of sync — refresh to load the latest UI
                     </Typography.Text>
                   )}
                 </Descriptions.Item>
@@ -189,10 +189,10 @@ export const AboutTab: React.FC<AboutTabProps> = ({
                 <Descriptions.Item label="Encryption">
                   {healthInfo.encryption.enabled ? (
                     <Typography.Text type="success">
-                      🔐 Enabled ({healthInfo.encryption.method})
+                      Enabled ({healthInfo.encryption.method})
                     </Typography.Text>
                   ) : (
-                    <Typography.Text type="warning">🔓 Disabled</Typography.Text>
+                    <Typography.Text type="warning">Disabled</Typography.Text>
                   )}
                 </Descriptions.Item>
               )}
@@ -218,9 +218,9 @@ export const AboutTab: React.FC<AboutTabProps> = ({
                       <>
                         <Descriptions.Item label="Database Type">
                           {healthInfo.database.dialect === 'postgresql' ? (
-                            <span>🐘 PostgreSQL</span>
+                            <span>PostgreSQL</span>
                           ) : (
-                            <span>💾 SQLite</span>
+                            <span>SQLite</span>
                           )}
                         </Descriptions.Item>
                         {healthInfo.database.dialect === 'postgresql' &&
@@ -237,15 +237,15 @@ export const AboutTab: React.FC<AboutTabProps> = ({
                       </>
                     ))}
                   {healthInfo?.auth && (
-                    <Descriptions.Item label="Authentication">🔐 Required</Descriptions.Item>
+                    <Descriptions.Item label="Authentication">Required</Descriptions.Item>
                   )}
                   {healthInfo?.execution && (
                     <>
                       <Descriptions.Item label="Branch RBAC">
                         {healthInfo.execution.branchRbac ? (
-                          <Typography.Text type="success">🛡️ Enabled</Typography.Text>
+                          <Typography.Text type="success">Enabled</Typography.Text>
                         ) : (
-                          <Typography.Text type="warning">⚠️ Disabled (open access)</Typography.Text>
+                          <Typography.Text type="warning">Disabled (open access)</Typography.Text>
                         )}
                       </Descriptions.Item>
                       <Descriptions.Item label="Unix User Mode">
@@ -316,12 +316,12 @@ export const AboutTab: React.FC<AboutTabProps> = ({
                       <code>{healthInfo.security.cors.mode}</code>
                       {healthInfo.security.cors.mode === 'wildcard' && (
                         <Typography.Text type="danger" style={{ marginLeft: 8 }}>
-                          ⚠️ Any origin accepted
+                          Any origin accepted
                         </Typography.Text>
                       )}
                       {healthInfo.security.cors.mode === 'reflect' && (
                         <Typography.Text type="warning" style={{ marginLeft: 8 }}>
-                          ⚠️ Origin header echoed
+                          Origin header echoed
                         </Typography.Text>
                       )}
                     </Descriptions.Item>

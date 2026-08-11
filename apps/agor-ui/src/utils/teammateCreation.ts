@@ -5,7 +5,6 @@ import { ensureTeammateWelcomeNote } from '@/utils/teammateWelcomeNote';
 export interface TeammateCreationInput {
   displayName: string;
   description?: string;
-  emoji?: string;
   repoId: string;
   branchName?: string;
   sourceBranch?: string;
@@ -68,7 +67,6 @@ export async function createTeammateBranch(
   } else {
     const newBoard = (await deps.client.service('boards').create({
       name: `${displayName}'s Board`,
-      icon: input.emoji || '\u{1F916}',
     })) as Board;
     boardId = newBoard.board_id;
   }
@@ -77,13 +75,11 @@ export async function createTeammateBranch(
     client: deps.client,
     boardId,
     teammateName: displayName,
-    teammateEmoji: input.emoji,
   });
 
   const teammateConfig: TeammateConfig = {
     kind: 'teammate',
     displayName: input.displayName.trim(),
-    emoji: input.emoji || undefined,
     frameworkRepo: repo?.slug,
     createdViaOnboarding: input.createdViaOnboarding ?? false,
   };

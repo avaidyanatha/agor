@@ -220,12 +220,7 @@ const CardModalComponent = ({
           gap: 8,
         }}
       >
-        {card.card_type && (
-          <Tag>
-            {card.card_type.emoji && `${card.card_type.emoji} `}
-            {card.card_type.name}
-          </Tag>
-        )}
+        {card.card_type && <Tag>{card.card_type.name}</Tag>}
         {board && (
           <Tag>
             {board.icon ? `${board.icon} ` : ''}

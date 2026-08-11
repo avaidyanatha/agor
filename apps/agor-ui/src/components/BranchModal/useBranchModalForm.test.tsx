@@ -234,9 +234,9 @@ describe('useBranchModalForm — unified save', () => {
     expect(boardPatches).toHaveLength(0);
   });
 
-  it('does patch the board icon when teammate emoji actually changed', async () => {
+  it('never patches the board from teammate edits (board icons are gone)', async () => {
     const alice = makeUser({ user_id: 'user-1', email: 'alice@example.com', role: 'admin' });
-    const branch = makeTeammateBranch({}, { emoji: '🤖' });
+    const branch = makeTeammateBranch({});
     const { client, calls } = makeStubClient({ owners: [alice], users: [alice] });
 
     const { result } = renderHook(
@@ -247,7 +247,7 @@ describe('useBranchModalForm — unified save', () => {
     await waitFor(() => expect(result.current.loadingOwners).toBe(false));
 
     act(() => {
-      result.current.setTeammate('emoji', '🎯');
+      result.current.setTeammate('displayName', 'Renamed Bot');
     });
 
     await act(async () => {
@@ -255,9 +255,7 @@ describe('useBranchModalForm — unified save', () => {
     });
 
     const boardPatches = calls.filter((c) => c.service === 'boards' && c.method === 'patch');
-    expect(boardPatches).toHaveLength(1);
-    const [, body] = boardPatches[0].args as [string, Record<string, unknown>];
-    expect(body).toMatchObject({ icon: '🎯' });
+    expect(boardPatches).toHaveLength(0);
   });
 
   it('does NOT call branches.patch for an owner-only transfer (no permission-field churn)', async () => {

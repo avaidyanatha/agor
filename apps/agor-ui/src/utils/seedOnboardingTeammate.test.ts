@@ -22,7 +22,6 @@ function setup(overrides: Partial<SeedOnboardingTeammateInput> = {}) {
     frameworkRepo: { repo_id: 'repo-fw', slug: 'preset-io/agor-teammate' } as Repo,
     boardId: 'board-1',
     teammateName: 'Rusty',
-    teammateEmoji: '🤖',
     agent: 'claude-code',
     suggestedIntegrations: ['Slack', 'GitHub'],
     user: { name: 'Ada', email: 'ada@example.com', persona: 'developer' },
@@ -55,7 +54,6 @@ describe('seedOnboardingTeammate', () => {
     expect(createTeammateBranchMock).toHaveBeenCalledWith(
       expect.objectContaining({
         displayName: 'Rusty',
-        emoji: '🤖',
         repoId: 'repo-fw',
         boardId: 'board-1',
       }),
@@ -73,7 +71,7 @@ describe('seedOnboardingTeammate', () => {
       expect.objectContaining({
         branch_id: 'branch-1',
         agent: 'claude-code',
-        title: '🤖 Rusty onboarding',
+        title: 'Rusty onboarding',
       })
     );
     const initialPrompt = (sessionArg.sessionConfig as { initialPrompt: string }).initialPrompt;

@@ -8,7 +8,7 @@
 export interface AgenticToolOption {
   id: string; // AgenticToolName as string
   name: string;
-  icon: string;
+  icon?: string;
   version?: string;
   description?: string;
   beta?: boolean; // Show beta badge for experimental features

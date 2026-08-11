@@ -1,1 +1,1 @@
-export { AgorEmojiPicker, EmojiPickerInput, FormEmojiPickerInput } from './EmojiPickerInput';
+export { AgorEmojiPicker } from './EmojiPickerInput';

@@ -17,13 +17,11 @@ describe('ensureTeammateWelcomeNote', () => {
       client: client as never,
       boardId: 'board-1',
       teammateName: 'Product/Design Agor Board',
-      teammateEmoji: '🧋',
     });
 
     expect(boardsService.ensureTeammateWelcomeNote).toHaveBeenCalledWith({
       boardId: 'board-1',
       teammateName: 'Product/Design Agor Board',
-      teammateEmoji: '🧋',
     });
   });
 

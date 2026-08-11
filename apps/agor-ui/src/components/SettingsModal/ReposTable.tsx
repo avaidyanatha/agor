@@ -349,7 +349,7 @@ export const ReposTable: React.FC<ReposTableProps> = ({
                   <Space orientation="vertical" size={8} style={{ width: '100%' }}>
                     <Typography.Text strong>Delete Completely (Remove Files)</Typography.Text>
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      ⚠️ Remove from database AND delete all filesystem directories (repository +
+                      Remove from database AND delete all filesystem directories (repository +
                       branches). This will free up disk space but cannot be undone.
                     </Typography.Text>
                     <Button

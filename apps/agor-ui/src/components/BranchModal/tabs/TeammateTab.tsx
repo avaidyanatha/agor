@@ -2,7 +2,6 @@ import type { Branch } from '@agor-live/client';
 import { getTeammateConfig } from '@agor-live/client';
 import { RobotOutlined } from '@ant-design/icons';
 import { Descriptions, Form, Input, Space, Typography } from 'antd';
-import { EmojiPickerInput } from '../../EmojiPickerInput/EmojiPickerInput';
 import { Tag } from '../../Tag';
 import type { TeammateFormState } from '../useBranchModalForm';
 
@@ -21,11 +20,7 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({ branch, canEdit, state
     <div style={{ width: '100%', maxHeight: '70vh', overflowY: 'auto' }}>
       <Space orientation="vertical" size="large" style={{ width: '100%' }}>
         <Space>
-          {config.emoji ? (
-            <span style={{ fontSize: 20 }}>{config.emoji}</span>
-          ) : (
-            <RobotOutlined style={{ fontSize: 20 }} />
-          )}
+          <RobotOutlined style={{ fontSize: 20 }} />
           <Typography.Text strong style={{ fontSize: 16 }}>
             Teammate Configuration
           </Typography.Text>
@@ -38,14 +33,6 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({ branch, canEdit, state
               value={state.displayName}
               onChange={(e) => setField('displayName', e.target.value)}
               placeholder="Teammate display name"
-              disabled={!canEdit}
-            />
-          </Form.Item>
-          <Form.Item label="Icon" labelCol={{ span: 6 }} wrapperCol={{ span: 18 }}>
-            <EmojiPickerInput
-              value={state.emoji}
-              onChange={(val) => setField('emoji', val)}
-              defaultEmoji="🤖"
               disabled={!canEdit}
             />
           </Form.Item>

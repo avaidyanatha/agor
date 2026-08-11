@@ -169,7 +169,7 @@ export const BranchFormFields: React.FC<BranchFormFieldsProps> = ({
               .sort((a: Board, b: Board) => a.name.localeCompare(b.name))
               .map((board: Board) => ({
                 value: board.board_id,
-                label: `${board.icon || '📋'} ${board.name}`,
+                label: board.name,
               }))}
             onChange={onFormChange}
           />

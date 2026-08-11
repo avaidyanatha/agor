@@ -384,8 +384,6 @@ const BranchCardComponent = ({
             >
               {isCreating || hasRunningSession ? (
                 <Spin size="large" />
-              ) : isAgent && teammateConfig?.emoji ? (
-                <span style={{ fontSize: 32 }}>{teammateConfig.emoji}</span>
               ) : isAgent ? (
                 <RobotOutlined
                   style={{

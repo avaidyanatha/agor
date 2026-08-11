@@ -104,11 +104,7 @@ export const TeammatesTable: React.FC<TeammatesTableProps> = ({
         const config = getTeammateConfig(record);
         return (
           <Space>
-            {config?.emoji ? (
-              <span style={{ fontSize: 18 }}>{config.emoji}</span>
-            ) : (
-              <RobotOutlined style={{ color: token.colorInfo }} />
-            )}
+            <RobotOutlined style={{ color: token.colorInfo }} />
             <Typography.Text strong>
               <HighlightMatch text={config?.displayName ?? record.name} query={searchTerm} />
             </Typography.Text>

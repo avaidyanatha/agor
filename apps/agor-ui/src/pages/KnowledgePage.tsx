@@ -3675,7 +3675,7 @@ export function KnowledgePage({
                               }
                             >
                               <Tag color="green">
-                                ♻️ {`${reuse.reusedChunks}/${reuse.totalChunks}`}
+                                {`${reuse.reusedChunks}/${reuse.totalChunks} reused`}
                               </Tag>
                             </Popover>
                           )}

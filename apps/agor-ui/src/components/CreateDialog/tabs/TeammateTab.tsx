@@ -30,7 +30,6 @@ import type { ModelConfig } from '../../ModelSelector';
 export interface TeammateTabResult {
   displayName: string;
   description?: string;
-  emoji?: string;
   repoId?: string;
   branchName?: string;
   sourceBranch?: string;
@@ -126,7 +125,6 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({
       const result: TeammateTabResult = {
         displayName: values.displayName.trim(),
         description: values.description || undefined,
-        emoji: values.emoji || undefined,
         repoId: values.repoId || frameworkRepo?.repo_id,
         branchName: values.name || `private-${slugify(values.displayName)}`,
         sourceBranch: values.sourceBranch || 'main',

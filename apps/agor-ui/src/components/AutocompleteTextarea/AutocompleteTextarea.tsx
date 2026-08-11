@@ -10,6 +10,7 @@
 
 import type { KnowledgeDocumentID, KnowledgeSearchResult } from '@agor/core/types';
 import type { AgorClient, SessionID, User } from '@agor-live/client';
+import { FileOutlined, FolderOutlined } from '@ant-design/icons';
 import { Input, Popover, Spin, Typography, theme } from 'antd';
 import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { useEmojiAutocomplete } from '@/hooks/useEmojiAutocomplete';
@@ -1320,9 +1321,9 @@ export const AutocompleteTextarea = React.forwardRef<
                   <span style={{ fontSize: 20, lineHeight: 1 }}>{item.emoji}</span>
                 )}
                 {/* Show folder icon for folders */}
-                {isFolder && <span style={{ opacity: 0.6 }}>📁</span>}
+                {isFolder && <FolderOutlined style={{ opacity: 0.6 }} />}
                 {/* Show doc icon for KB docs */}
-                {isKbDoc && <span style={{ opacity: 0.6 }}>📄</span>}
+                {isKbDoc && <FileOutlined style={{ opacity: 0.6 }} />}
                 <Text ellipsis style={{ flex: 1 }}>
                   {'emoji' in item
                     ? `:${item.shortcode}:`

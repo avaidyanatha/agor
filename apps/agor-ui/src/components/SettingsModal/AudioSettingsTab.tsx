@@ -88,7 +88,7 @@ export const AudioSettingsTab: React.FC<AudioSettingsTabProps> = ({ form, onValu
     <div>
       <div style={{ marginBottom: 16 }}>
         <Text strong style={{ fontSize: token.fontSizeLG }}>
-          🔊 Task Completion Chimes
+          Task Completion Chimes
         </Text>
         <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
           Play a sound when agent tasks finish executing. Perfect for long-running tasks!
@@ -109,8 +109,8 @@ export const AudioSettingsTab: React.FC<AudioSettingsTabProps> = ({ form, onValu
               </p>
               <ol style={{ marginLeft: 16, marginBottom: 8 }}>
                 <li>
-                  Click the <strong>lock icon</strong> (🔒) or <strong>site info icon</strong> in
-                  your browser's address bar
+                  Click the <strong>lock icon</strong> or <strong>site info icon</strong> in your
+                  browser's address bar
                 </li>
                 <li>
                   Find <strong>"Sound"</strong> or <strong>"Autoplay"</strong> permissions

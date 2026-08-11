@@ -57,12 +57,7 @@ export const MobileCommentsPage: React.FC<MobileCommentsPageProps> = ({
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
-      <MobileHeader
-        title={`${board.icon || '📋'} ${board.name}`}
-        showMenu
-        user={currentUser}
-        onMenuClick={onMenuClick}
-      />
+      <MobileHeader title={board.name} showMenu user={currentUser} onMenuClick={onMenuClick} />
       <div style={{ flex: 1, overflow: 'hidden' }}>
         <CommentsPanel
           client={client}

@@ -279,7 +279,8 @@ const SessionCard = ({
           <div style={{ marginBottom: 8 }}>
             <Space size={4}>
               <Typography.Text type="secondary">
-                📍 {latestRef} @ {cleanSha.substring(0, 7)}
+                <BranchesOutlined style={{ marginRight: 4 }} />
+                {latestRef} @ {cleanSha.substring(0, 7)}
               </Typography.Text>
               {isDirty && (
                 <Tag icon={<EditOutlined />} color="orange" style={{ fontSize: 11 }}>
@@ -294,7 +295,7 @@ const SessionCard = ({
         {/* {session.contextFiles && session.contextFiles.length > 0 && (
           <div style={{ marginBottom: 12 }}>
             <Space size={4} wrap>
-              <Typography.Text type="secondary">📦</Typography.Text>
+              <Typography.Text type="secondary">Files:</Typography.Text>
               {session.contextFiles.map((file) => (
                 <Tag key={file} color="geekblue">
                   {file}

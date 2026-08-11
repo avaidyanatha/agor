@@ -12,6 +12,7 @@ import { memo, useMemo, useState } from 'react';
 import { useAgorStore } from '../../store/agorStore';
 import { selectBoardById, selectBranchById, selectSessionsByBranch } from '../../store/selectors';
 import { getTimeMs } from '../../utils/entityTime';
+import { nameInitial } from '../../utils/nameInitial';
 import { formatRelativeTime } from '../../utils/time';
 import { glassSurfaceStyle, withAlpha } from './homeStyles';
 import type { HomePageProps } from './types';
@@ -148,11 +149,12 @@ const BoardHomeCard = memo(function BoardHomeCard({
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              fontSize: 20,
+              fontSize: 16,
+              fontWeight: 600,
               flexShrink: 0,
             }}
           >
-            {board.icon || '📋'}
+            {nameInitial(board.name)}
           </div>
 
           {/* Name + meta — all aligned under each other, to the right of the icon */}

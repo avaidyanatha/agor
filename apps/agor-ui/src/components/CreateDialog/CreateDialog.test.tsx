@@ -160,7 +160,6 @@ describe('CreateDialog — per-tab validity scoping', { timeout: 60_000 }, () =>
       expect(onCreateTeammate).toHaveBeenCalledWith(
         expect.objectContaining({
           displayName: 'Bootstrap Bot',
-          emoji: '🤖',
           agent: 'claude-code',
           permissionMode: 'auto',
         }),

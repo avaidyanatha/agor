@@ -2,7 +2,6 @@ import type { Repo } from '@agor-live/client';
 import { DownOutlined, InfoCircleOutlined, LoadingOutlined } from '@ant-design/icons';
 import type { FormInstance } from 'antd';
 import { Alert, Collapse, Form, Input, Select, Space, Tooltip, Typography, theme } from 'antd';
-import { FormEmojiPickerInput } from '../EmojiPickerInput/EmojiPickerInput';
 
 export interface TeammateFormFieldsProps {
   form: FormInstance;
@@ -42,22 +41,18 @@ export const TeammateFormFields: React.FC<TeammateFormFieldsProps> = ({
 
   return (
     <>
-      <Form.Item label="Name" required tooltip="Human-friendly name and icon for this AI teammate">
-        <Space.Compact style={{ display: 'flex' }}>
-          <FormEmojiPickerInput form={form} fieldName="emoji" defaultEmoji="🤖" />
-          <Form.Item
-            name="displayName"
-            noStyle
-            rules={[{ required: true, message: 'Please enter a name' }]}
-          >
-            <Input
-              placeholder="e.g. PR Reviewer, Command Center"
-              autoFocus
-              onChange={onDisplayNameChange}
-              style={{ flex: 1 }}
-            />
-          </Form.Item>
-        </Space.Compact>
+      <Form.Item label="Name" required tooltip="Human-friendly name for this AI teammate">
+        <Form.Item
+          name="displayName"
+          noStyle
+          rules={[{ required: true, message: 'Please enter a name' }]}
+        >
+          <Input
+            placeholder="e.g. PR Reviewer, Command Center"
+            autoFocus
+            onChange={onDisplayNameChange}
+          />
+        </Form.Item>
       </Form.Item>
 
       <Form.Item

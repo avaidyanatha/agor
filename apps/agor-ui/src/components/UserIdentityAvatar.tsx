@@ -1,6 +1,7 @@
 import type { User } from '@agor-live/client';
 import { Avatar, type AvatarProps, theme } from 'antd';
 import type { CSSProperties } from 'react';
+import { nameInitial } from '../utils/nameInitial';
 
 export interface UserIdentityAvatarProps extends Omit<AvatarProps, 'src' | 'style'> {
   user?: Pick<
@@ -43,13 +44,14 @@ export const UserIdentityAvatar: React.FC<UserIdentityAvatarProps> = ({
         borderRadius: slackAvatarRadius(size),
         backgroundColor: avatarUrl ? token.colorBgContainer : token.colorPrimaryBg,
         color: token.colorText,
-        fontSize: fontSize ?? `${Math.round(size * 0.6)}px`,
+        fontSize: fontSize ?? `${Math.round(size * 0.45)}px`,
+        fontWeight: 600,
         lineHeight: `${size}px`,
         overflow: 'hidden',
         ...style,
       }}
     >
-      {user?.emoji || '👤'}
+      {nameInitial(user?.name || user?.email)}
     </Avatar>
   );
 };

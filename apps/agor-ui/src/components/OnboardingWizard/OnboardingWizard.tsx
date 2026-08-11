@@ -17,18 +17,19 @@ import type {
   UserPreferences,
 } from '@agor-live/client';
 import {
+  ApiOutlined,
   CheckCircleOutlined,
   CheckOutlined,
   CloseOutlined,
   LeftOutlined,
   LoadingOutlined,
+  RobotOutlined,
 } from '@ant-design/icons';
 import { Alert, Button, Input, Modal, Spin, Tag, Tooltip, Typography, theme } from 'antd';
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAgorStore } from '../../store/agorStore';
 import { ONBOARDING_PERSONAS } from '../../utils/onboardingPersonas';
 import { type CodexAuthFallback, CodexDeviceSignIn, CodexImportAuthJson } from '../CodexAuth';
-import { EmojiPickerInput } from '../EmojiPickerInput/EmojiPickerInput';
 import { GlassPanelHighlights } from '../GlassSurface/GlassPanel';
 
 const { Text, Title, Paragraph } = Typography;
@@ -141,7 +142,6 @@ const LLM_OPTIONS: LlmOption[] = [
 interface McpRecommendation {
   id: string;
   name: string;
-  emoji: string;
   description: string;
   docsUrl: string;
   featured?: boolean;
@@ -154,7 +154,6 @@ const PERSONA_MCP_RECS: Record<string, McpRecommendation[]> = {
     {
       id: 'slack',
       name: 'Slack',
-      emoji: '💬',
       description:
         'Get notified when sessions finish, send prompts from Slack, and schedule agents that post daily build reports.',
       docsUrl: 'https://agor.live/docs/mcp/slack',
@@ -163,21 +162,18 @@ const PERSONA_MCP_RECS: Record<string, McpRecommendation[]> = {
     {
       id: 'github',
       name: 'GitHub',
-      emoji: '🐙',
       description: 'Your AI opens PRs, reviews code, and syncs issues automatically.',
       docsUrl: 'https://agor.live/docs/mcp/github',
     },
     {
       id: 'sentry',
       name: 'Sentry',
-      emoji: '🚨',
       description: 'Let your AI read error traces and fix bugs straight from the issue.',
       docsUrl: 'https://agor.live/docs/mcp/sentry',
     },
     {
       id: 'datadog',
       name: 'Datadog',
-      emoji: '🐕',
       description: 'Query metrics, read alerts, and have your AI investigate anomalies for you.',
       docsUrl: 'https://agor.live/docs/mcp/datadog',
     },
@@ -186,7 +182,6 @@ const PERSONA_MCP_RECS: Record<string, McpRecommendation[]> = {
     {
       id: 'slack',
       name: 'Slack',
-      emoji: '💬',
       description:
         'Post standup summaries, unblock threads, and set up agents that DM you scheduled status reports.',
       docsUrl: 'https://agor.live/docs/mcp/slack',
@@ -195,21 +190,18 @@ const PERSONA_MCP_RECS: Record<string, McpRecommendation[]> = {
     {
       id: 'hubspot',
       name: 'HubSpot',
-      emoji: '🟠',
       description: 'Pull customer context into sessions - your AI knows who you are building for.',
       docsUrl: 'https://agor.live/docs/mcp/hubspot',
     },
     {
       id: 'amplitude',
       name: 'Amplitude',
-      emoji: '📈',
       description: 'Ask your AI what the data says without writing a single query.',
       docsUrl: 'https://agor.live/docs/mcp/amplitude',
     },
     {
       id: 'figma',
       name: 'Figma',
-      emoji: '🎨',
       description: 'Read design files and write feedback without switching tabs.',
       docsUrl: 'https://agor.live/docs/mcp/figma',
     },
@@ -218,7 +210,6 @@ const PERSONA_MCP_RECS: Record<string, McpRecommendation[]> = {
     {
       id: 'slack',
       name: 'Slack',
-      emoji: '💬',
       description:
         'Broadcast outcomes, surface blockers, and schedule weekly digest agents that report to your team channel.',
       docsUrl: 'https://agor.live/docs/mcp/slack',
@@ -227,7 +218,6 @@ const PERSONA_MCP_RECS: Record<string, McpRecommendation[]> = {
     {
       id: 'hubspot',
       name: 'HubSpot',
-      emoji: '🟠',
       description:
         'Keep an eye on the pipeline without leaving your session - revenue visibility in context.',
       docsUrl: 'https://agor.live/docs/mcp/hubspot',
@@ -235,7 +225,6 @@ const PERSONA_MCP_RECS: Record<string, McpRecommendation[]> = {
     {
       id: 'linear',
       name: 'Linear',
-      emoji: '🎯',
       description:
         'See what is in progress, what is blocked, and what shipped - without chasing updates.',
       docsUrl: 'https://agor.live/docs/mcp/linear',
@@ -243,7 +232,6 @@ const PERSONA_MCP_RECS: Record<string, McpRecommendation[]> = {
     {
       id: 'datadog',
       name: 'Datadog',
-      emoji: '🐕',
       description: 'Get a live health read on your systems without pinging the on-call engineer.',
       docsUrl: 'https://agor.live/docs/mcp/datadog',
     },
@@ -252,7 +240,6 @@ const PERSONA_MCP_RECS: Record<string, McpRecommendation[]> = {
     {
       id: 'slack',
       name: 'Slack',
-      emoji: '💬',
       description:
         'Get pinged when sessions finish and run agents that talk to you on Slack - like a personal AI assistant.',
       docsUrl: 'https://agor.live/docs/mcp/slack',
@@ -261,21 +248,18 @@ const PERSONA_MCP_RECS: Record<string, McpRecommendation[]> = {
     {
       id: 'github',
       name: 'GitHub',
-      emoji: '🐙',
       description: 'Open PRs, push commits, and manage your repos hands-free.',
       docsUrl: 'https://agor.live/docs/mcp/github',
     },
     {
       id: 'stripe',
       name: 'Stripe',
-      emoji: '💳',
       description: 'Ask your AI what revenue looks like today - no dashboard needed.',
       docsUrl: 'https://agor.live/docs/mcp/stripe',
     },
     {
       id: 'hubspot',
       name: 'HubSpot',
-      emoji: '🟠',
       description:
         'Let your AI handle follow-ups, log calls, and keep your pipeline moving while you build.',
       docsUrl: 'https://agor.live/docs/mcp/hubspot',
@@ -285,7 +269,6 @@ const PERSONA_MCP_RECS: Record<string, McpRecommendation[]> = {
     {
       id: 'slack',
       name: 'Slack',
-      emoji: '💬',
       description:
         'Get notified when sessions finish, send prompts from Slack, and schedule agents that report back to you.',
       docsUrl: 'https://agor.live/docs/mcp/slack',
@@ -294,21 +277,18 @@ const PERSONA_MCP_RECS: Record<string, McpRecommendation[]> = {
     {
       id: 'github',
       name: 'GitHub',
-      emoji: '🐙',
       description: 'Open PRs, review code, and sync issues automatically.',
       docsUrl: 'https://agor.live/docs/mcp/github',
     },
     {
       id: 'linear',
       name: 'Linear',
-      emoji: '🎯',
       description: 'Pick up issues and update status automatically.',
       docsUrl: 'https://agor.live/docs/mcp/linear',
     },
     {
       id: 'notion',
       name: 'Notion',
-      emoji: '📝',
       description: 'Write and update docs as your AI works.',
       docsUrl: 'https://agor.live/docs/mcp/notion',
     },
@@ -465,8 +445,6 @@ export interface OnboardingWizardProps {
     path: 'teammate';
     /** Name of the first AI teammate to create on completion. */
     teammateName?: string;
-    /** Avatar emoji for the first AI teammate (defaults to 🤖). */
-    teammateEmoji?: string;
     /** Agent selected in the LLM step, used for the teammate's bootstrap session. */
     agent?: AgenticToolName | null;
     /** Persona-tailored MCP integration names to seed into the bootstrap prompt. */
@@ -553,10 +531,9 @@ export function OnboardingWizard({
   );
 
   // ── Step 3: workspace — name the user's first AI teammate ─────────────────
-  // The teammate's name/emoji also names the board the wizard creates for them,
+  // The teammate's name also names the board the wizard creates for them,
   // which the teammate is later seeded onto (see App.handleOnboardingComplete).
   const [teammateName, setTeammateName] = useState('');
-  const [teammateEmoji, setTeammateEmoji] = useState('🤖');
   const [createdBoardId, setCreatedBoardId] = useState<string | null>(null);
   const [boardCreating, setBoardCreating] = useState(false);
   const [boardError, setBoardError] = useState<string | null>(null);
@@ -587,7 +564,6 @@ export function OnboardingWizard({
     setLlmAuthChecking(null);
     setLlmAuthVerified({});
     setTeammateName('');
-    setTeammateEmoji('🤖');
     setCreatedBoardId(null);
     setBoardError(null);
     setBoardCreating(false);
@@ -1027,7 +1003,6 @@ export function OnboardingWizard({
         try {
           const board = await client.service('boards').create({
             name: teammateName.trim(),
-            icon: teammateEmoji,
           });
           const newBoardId = board?.board_id ?? null;
           if (!newBoardId) {
@@ -1065,7 +1040,6 @@ export function OnboardingWizard({
             path: 'teammate',
             // Naming details for the first AI teammate, seeded on completion.
             teammateName: teammateName.trim() || undefined,
-            teammateEmoji,
             agent: selectedAgent,
             suggestedIntegrations,
             persona: selectedPersona,
@@ -1091,7 +1065,6 @@ export function OnboardingWizard({
     hasExistingBoard,
     client,
     teammateName,
-    teammateEmoji,
     saveOnboardingProgress,
     createdBoardId,
     verifiedBoard,
@@ -1221,7 +1194,6 @@ export function OnboardingWizard({
                   width: '100%',
                 }}
               >
-                <div style={{ fontSize: 24, marginBottom: 8 }}>{persona.emoji}</div>
                 <div
                   style={{ color: TEXT_PRIMARY, fontWeight: 600, fontSize: 14, marginBottom: 6 }}
                 >
@@ -1612,10 +1584,10 @@ export function OnboardingWizard({
       {/* Concept pills */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 24 }}>
         {[
-          { emoji: '🌿', term: 'Branch', def: 'isolated workspace per task' },
-          { emoji: '💬', term: 'Session', def: 'conversation with your AI' },
-          { emoji: '📋', term: 'Board', def: 'kanban view of all branches' },
-        ].map(({ emoji, term, def }) => (
+          { term: 'Branch', def: 'isolated workspace per task' },
+          { term: 'Session', def: 'conversation with your AI' },
+          { term: 'Board', def: 'kanban view of all branches' },
+        ].map(({ term, def }) => (
           <div
             key={term}
             style={{
@@ -1631,7 +1603,7 @@ export function OnboardingWizard({
               boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.09)',
             }}
           >
-            {emoji} <span style={{ color: TEXT_PRIMARY, fontWeight: 500 }}>{term}</span> - {def}
+            <span style={{ color: TEXT_PRIMARY, fontWeight: 500 }}>{term}</span> - {def}
           </div>
         ))}
       </div>
@@ -1669,11 +1641,6 @@ export function OnboardingWizard({
               Teammate name
             </Text>
             <div style={{ display: 'flex', gap: 0 }}>
-              <EmojiPickerInput
-                value={teammateEmoji}
-                onChange={setTeammateEmoji}
-                defaultEmoji="🤖"
-              />
               <Input
                 aria-label="Teammate name"
                 placeholder="e.g. Rusty, Ada, Scout…"
@@ -1682,8 +1649,6 @@ export function OnboardingWizard({
                 style={{
                   background: 'rgba(0,0,0,0.3)',
                   borderColor: 'rgba(255,255,255,0.12)',
-                  borderTopLeftRadius: 0,
-                  borderBottomLeftRadius: 0,
                   flex: 1,
                 }}
               />
@@ -1706,7 +1671,7 @@ export function OnboardingWizard({
                   alignItems: 'flex-start',
                 }}
               >
-                <span style={{ fontSize: 18, flexShrink: 0 }}>🤖</span>
+                <RobotOutlined style={{ fontSize: 18, flexShrink: 0 }} />
                 <div>
                   <Text style={{ color: TEXT_PRIMARY, fontWeight: 500, fontSize: 13 }}>
                     Board's AI tool
@@ -1787,7 +1752,7 @@ export function OnboardingWizard({
                   gap: 12,
                 }}
               >
-                <span style={{ fontSize: 20, flexShrink: 0 }}>{rec.emoji}</span>
+                <ApiOutlined style={{ fontSize: 18, flexShrink: 0 }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                     <span style={{ color: TEXT_PRIMARY, fontWeight: 600, fontSize: 13 }}>

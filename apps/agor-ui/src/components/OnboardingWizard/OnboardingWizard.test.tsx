@@ -340,7 +340,7 @@ describe('OnboardingWizard', () => {
     clickButton(/^continue →/i);
 
     await waitFor(() => {
-      expect(boardsService.create).toHaveBeenCalledWith({ name: 'Rusty', icon: '🤖' });
+      expect(boardsService.create).toHaveBeenCalledWith({ name: 'Rusty' });
     });
     await waitFor(() => {
       expect(onUpdateUser).toHaveBeenCalledWith(
@@ -425,7 +425,7 @@ describe('OnboardingWizard', () => {
     clickButton(/^continue →/i);
 
     await waitFor(() => {
-      expect(boardsService.create).toHaveBeenCalledWith({ name: 'Ada', icon: '🤖' });
+      expect(boardsService.create).toHaveBeenCalledWith({ name: 'Ada' });
     });
   });
 
@@ -473,7 +473,6 @@ describe('OnboardingWizard', () => {
       boardId: 'board-1',
       path: 'teammate',
       teammateName: 'Rusty',
-      teammateEmoji: '🤖',
       agent: 'claude-code',
       // Persona was skipped → the default MCP suggestion set flows through, and
       // the persona threaded to the completion handler is null.
@@ -516,7 +515,6 @@ describe('OnboardingWizard', () => {
       boardId: '',
       path: 'teammate',
       teammateName: undefined,
-      teammateEmoji: '🤖',
       agent: null,
       suggestedIntegrations: ['Slack', 'GitHub', 'Linear', 'Notion'],
       persona: null,

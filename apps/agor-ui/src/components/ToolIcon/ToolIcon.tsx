@@ -4,6 +4,7 @@
  * Displays a tool/agent logo in a circle with black background
  */
 
+import { RobotOutlined } from '@ant-design/icons';
 import { theme } from 'antd';
 import ccLogo from '../../assets/tools/cc.png';
 import codexLogo from '../../assets/tools/codex.png';
@@ -42,18 +43,8 @@ export const ToolIcon: React.FC<ToolIconProps> = ({ tool, size = 32, className =
   const logoSrc = toolLogos[tool];
   const bg = DARK_LOGO_PLATE;
 
-  // Fallback to emoji if no logo available
-  const fallbackEmoji: Record<string, string> = {
-    'claude-code': '🤖',
-    codex: '💻',
-    gemini: '💎',
-    opencode: '🌐',
-    copilot: '✈️',
-    cursor: '⌘',
-  };
-
   if (!logoSrc) {
-    // Render emoji fallback
+    // Neutral icon fallback when no brand logo is available
     return (
       <div
         className={`tool-icon ${className}`}
@@ -70,7 +61,7 @@ export const ToolIcon: React.FC<ToolIconProps> = ({ tool, size = 32, className =
           flexShrink: 0,
         }}
       >
-        {fallbackEmoji[tool] || '🤖'}
+        <RobotOutlined style={{ fontSize: size * 0.55 }} />
       </div>
     );
   }

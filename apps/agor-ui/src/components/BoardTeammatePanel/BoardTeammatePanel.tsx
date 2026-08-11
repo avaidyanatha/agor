@@ -379,8 +379,6 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
               >
                 {isCreating ? (
                   <Spin />
-                ) : teammateConfig?.emoji ? (
-                  <span style={{ fontSize: 30 }}>{teammateConfig.emoji}</span>
                 ) : (
                   <RobotOutlined style={{ fontSize: 30, color: token.colorInfo }} />
                 )}

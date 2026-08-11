@@ -31,7 +31,7 @@ export function getZoneParentInfo(zoneId: string, board?: Board): ParentInfo {
   const zone = board?.objects?.[zoneId];
   return {
     parentId: `zone-${zoneId}`,
-    parentLabel: zone?.type === 'zone' ? `📍 ${zone.label}` : undefined,
+    parentLabel: zone?.type === 'zone' ? zone.label : undefined,
     parentColor: zone?.type === 'zone' ? zone.color : undefined,
   };
 }
@@ -54,7 +54,7 @@ export function getBranchParentInfo(branchId: string, branches: Branch[]): Paren
   const branch = branches.find((w) => w.branch_id === branchId);
   return {
     parentId: branchId,
-    parentLabel: branch ? `🌳 ${branch.name}` : undefined,
+    parentLabel: branch ? branch.name : undefined,
     parentColor: undefined, // Branches don't have colors (yet)
   };
 }

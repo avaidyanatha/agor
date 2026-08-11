@@ -126,7 +126,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                   .sort((a, b) => a.name.localeCompare(b.name))
                   .map((board) => ({
                     value: board.board_id,
-                    label: `${board.icon || '📋'} ${board.name}`,
+                    label: board.name,
                   }))}
               />
             </Form.Item>

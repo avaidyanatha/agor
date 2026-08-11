@@ -694,7 +694,6 @@ function AppContent() {
     boardId: string;
     path: 'teammate' | 'own-repo';
     teammateName?: string;
-    teammateEmoji?: string;
     agent?: AgenticToolName | null;
     suggestedIntegrations?: string[];
     persona?: string | null;
@@ -762,7 +761,6 @@ function AppContent() {
       frameworkRepo: readyFrameworkRepo,
       boardId: result.boardId,
       teammateName: result.teammateName,
-      teammateEmoji: result.teammateEmoji,
       agent: result.agent,
       suggestedIntegrations: result.suggestedIntegrations,
       user: {
@@ -1358,7 +1356,7 @@ function AppContent() {
 
       // Check for partial deletion (some files deleted, some failed)
       if (errorMessage.includes('Partial deletion occurred:')) {
-        showError(`⚠️ PARTIAL DELETION: Some files were permanently deleted. ${errorMessage}`);
+        showError(`PARTIAL DELETION: Some files were permanently deleted. ${errorMessage}`);
       }
       // Check for complete failure (no files deleted)
       else if (errorMessage.includes('No files were deleted')) {

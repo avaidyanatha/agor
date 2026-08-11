@@ -54,7 +54,6 @@ export interface GeneralFormState {
 
 export interface TeammateFormState {
   displayName: string;
-  emoji: string;
   description: string;
 }
 
@@ -141,7 +140,6 @@ const buildTeammateDefaults = (branch: Branch | null): TeammateFormState => {
   const config = branch ? getTeammateConfig(branch) : null;
   return {
     displayName: config?.displayName || '',
-    emoji: config?.emoji || '',
     description: branch?.notes || '',
   };
 };
@@ -410,7 +408,6 @@ export function useBranchModalForm({
     if (!config) return false;
     return (
       teammate.displayName.trim() !== config.displayName ||
-      teammate.emoji !== (config.emoji || '') ||
       teammate.description.trim() !== (branch.notes || '')
     );
   }, [branch, teammate, isTeammateBranch]);
@@ -546,7 +543,6 @@ export function useBranchModalForm({
             ...config,
             kind: 'teammate',
             displayName: teammate.displayName.trim(),
-            emoji: teammate.emoji || undefined,
           };
           updates.custom_context = { ...(branch.custom_context ?? {}), teammate: updatedConfig };
           updates.notes = teammate.description.trim() || null;
@@ -607,22 +603,6 @@ export function useBranchModalForm({
           await client
             .service('branches/:id/owners')
             .remove(userId, { route: { id: branch.branch_id } });
-        }
-      }
-
-      // 5. Teammate emoji → board icon side effect. Cosmetic only — log on
-      // failure, don't fail the save.
-      if (teammateChanged && isTeammateBranch && canEditGeneral && branch.board_id) {
-        const config = getTeammateConfig(branch);
-        const emojiChanged = config && teammate.emoji !== (config.emoji || '');
-        if (emojiChanged) {
-          try {
-            await client.service('boards').patch(branch.board_id, {
-              icon: teammate.emoji || '🤖',
-            });
-          } catch (err) {
-            console.error('Failed to update board icon:', err);
-          }
         }
       }
 

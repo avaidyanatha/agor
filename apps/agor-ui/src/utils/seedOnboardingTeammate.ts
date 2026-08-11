@@ -12,7 +12,6 @@ export interface SeedOnboardingTeammateInput {
   /** Board the wizard already created; the teammate is seeded onto it (no second board). */
   boardId: string;
   teammateName?: string;
-  teammateEmoji?: string;
   /** Agent chosen in the LLM step; defaults to claude-code. */
   agent?: AgenticToolName | null;
   /** Persona-tailored MCP integration names to suggest in the onboarding prompt. */
@@ -55,7 +54,6 @@ export async function seedOnboardingTeammate(
     const branch = await createTeammateBranch(
       {
         displayName: teammateName,
-        emoji: input.teammateEmoji,
         repoId: input.frameworkRepo.repo_id,
         boardId: input.boardId,
         createdViaOnboarding: true,
@@ -84,11 +82,9 @@ export async function seedOnboardingTeammate(
         agent: input.agent ?? 'claude-code',
         title: buildTeammateOnboardingSessionTitle({
           displayName: teammateName,
-          emoji: input.teammateEmoji,
         }),
         initialPrompt: buildTeammateBootstrapPrompt({
           displayName: teammateName,
-          emoji: input.teammateEmoji,
           userName: input.user?.name,
           userEmail: input.user?.email,
           persona: input.user?.persona,

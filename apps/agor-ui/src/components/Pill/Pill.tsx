@@ -321,7 +321,7 @@ const ContextWindowPopoverContent: React.FC<{
   if (sdkResponse) {
     advancedItems.push({
       key: 'raw-sdk-response',
-      label: '🔍 Raw SDK Response',
+      label: 'Raw SDK Response',
       children: (
         <pre
           style={{
@@ -805,7 +805,7 @@ interface ConceptPillProps extends BasePillProps {
 
 export const ConceptPill: React.FC<ConceptPillProps> = ({ name, style }) => (
   <Tag color={PILL_COLORS.concept} style={style}>
-    📦 {name}
+    {name}
   </Tag>
 );
 
@@ -829,7 +829,6 @@ interface EntityPillProps extends BasePillProps {
   icon?: React.ReactNode;
   color: string;
   label?: React.ReactNode;
-  emoji?: string | null;
   compact?: boolean;
   title?: string;
   onClick?: (e: EntityPillInteractionEvent) => void;
@@ -843,7 +842,6 @@ export const EntityPill: React.FC<EntityPillProps> = ({
   icon,
   color,
   label,
-  emoji,
   compact = false,
   title,
   onClick,
@@ -866,7 +864,7 @@ export const EntityPill: React.FC<EntityPillProps> = ({
 
   return (
     <Tag
-      icon={emoji ? undefined : icon}
+      icon={icon}
       color={color}
       title={title}
       aria-label={resolvedAriaLabel}
@@ -886,7 +884,6 @@ export const EntityPill: React.FC<EntityPillProps> = ({
           style={{
             display: 'inline-flex',
             alignItems: 'center',
-            gap: emoji ? 4 : undefined,
             maxWidth: compact ? maxWidth : undefined,
             overflow: compact ? 'hidden' : undefined,
             textOverflow: compact ? 'ellipsis' : undefined,
@@ -895,7 +892,6 @@ export const EntityPill: React.FC<EntityPillProps> = ({
             fontFamily: code ? token.fontFamilyCode : token.fontFamily,
           }}
         >
-          {emoji && <span style={{ fontFamily: token.fontFamily }}>{emoji}</span>}
           {label}
         </span>
       )}
@@ -907,7 +903,6 @@ interface BranchPillProps extends BasePillProps {
   branch: string;
   compact?: boolean;
   title?: string;
-  emoji?: string | null;
   onClick?: (e: EntityPillInteractionEvent) => void;
 }
 
@@ -915,7 +910,6 @@ export const BranchPill: React.FC<BranchPillProps> = ({
   branch,
   compact = false,
   title,
-  emoji,
   onClick,
   style,
 }) => (
@@ -923,7 +917,6 @@ export const BranchPill: React.FC<BranchPillProps> = ({
     icon={<BranchesOutlined />}
     color={ENTITY_PILL_COLORS.branch}
     label={branch}
-    emoji={emoji}
     compact={compact}
     title={title}
     onClick={onClick}
@@ -953,7 +946,6 @@ export const BoardPill: React.FC<BoardPillProps> = ({
     icon={<ApartmentOutlined />}
     color={ENTITY_PILL_COLORS.board}
     label={board.name}
-    emoji={board.icon}
     compact={compact}
     title={title ?? board.name}
     onClick={onClick}
@@ -986,7 +978,6 @@ export const UserPill: React.FC<UserPillProps> = ({
       icon={<UserOutlined />}
       color={ENTITY_PILL_COLORS.user}
       label={label}
-      emoji={user.emoji}
       compact={compact}
       title={title ?? label}
       onClick={onClick}
@@ -998,7 +989,6 @@ export const UserPill: React.FC<UserPillProps> = ({
 
 interface TeammatePillProps extends BasePillProps {
   name: string;
-  emoji?: string | null;
   compact?: boolean;
   title?: string;
   onClick?: (e: EntityPillInteractionEvent) => void;
@@ -1006,7 +996,6 @@ interface TeammatePillProps extends BasePillProps {
 
 export const TeammatePill: React.FC<TeammatePillProps> = ({
   name,
-  emoji,
   compact = false,
   title,
   onClick,
@@ -1016,7 +1005,6 @@ export const TeammatePill: React.FC<TeammatePillProps> = ({
     icon={<RobotOutlined />}
     color={ENTITY_PILL_COLORS.teammate}
     label={name}
-    emoji={emoji}
     compact={compact}
     title={title ?? name}
     onClick={onClick}

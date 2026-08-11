@@ -2,7 +2,6 @@ import { findOnboardingPersona } from './onboardingPersonas';
 
 export interface TeammateBootstrapPromptInput {
   displayName: string;
-  emoji?: string | null;
   description?: string | null;
   userName?: string | null;
   userEmail?: string | null;
@@ -15,7 +14,6 @@ export interface TeammateBootstrapPromptInput {
 export interface TeammateBootstrapPromptContext {
   teammate: {
     displayName: string;
-    emoji: string;
     description?: string;
   };
   user?: {
@@ -29,9 +27,8 @@ export interface TeammateBootstrapPromptContext {
 
 export function buildTeammateOnboardingSessionTitle({
   displayName,
-  emoji,
-}: Pick<TeammateBootstrapPromptInput, 'displayName' | 'emoji'>): string {
-  return `${emoji ? `${emoji} ` : ''}${displayName} onboarding`;
+}: Pick<TeammateBootstrapPromptInput, 'displayName'>): string {
+  return `${displayName} onboarding`;
 }
 
 function formatTeammateBootstrapPrompt(context: TeammateBootstrapPromptContext): string {
@@ -39,7 +36,7 @@ function formatTeammateBootstrapPrompt(context: TeammateBootstrapPromptContext):
     '### First-session onboarding instructions for Agor AI teammate',
     '',
     'Context:',
-    `- AI teammate: ${context.teammate.displayName} ${context.teammate.emoji}`,
+    `- AI teammate: ${context.teammate.displayName}`,
   ];
 
   if (context.teammate.description) {
@@ -73,7 +70,6 @@ function formatTeammateBootstrapPrompt(context: TeammateBootstrapPromptContext):
 
 export function buildTeammateBootstrapPromptContext({
   displayName,
-  emoji,
   description,
   userName,
   userEmail,
@@ -91,7 +87,6 @@ export function buildTeammateBootstrapPromptContext({
   return {
     teammate: {
       displayName: displayName.trim() || 'My Teammate',
-      emoji: emoji?.trim() || '🤖',
       ...(description?.trim() ? { description: description.trim() } : {}),
     },
     ...(normalizedUserName || normalizedUserEmail

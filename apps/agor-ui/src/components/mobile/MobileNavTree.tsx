@@ -1,5 +1,13 @@
 import type { Board, BoardComment, Branch, Session } from '@agor-live/client';
-import { CommentOutlined, DownOutlined } from '@ant-design/icons';
+import {
+  BranchesOutlined,
+  CheckCircleOutlined,
+  CloseCircleOutlined,
+  CommentOutlined,
+  DownOutlined,
+  PauseCircleOutlined,
+  PlayCircleOutlined,
+} from '@ant-design/icons';
 import { Badge, Button, Collapse, Space, Typography, theme } from 'antd';
 import { useNavigate } from 'react-router-dom';
 import { mapToArray } from '@/utils/mapHelpers';
@@ -75,12 +83,15 @@ export const MobileNavTree: React.FC<MobileNavTreeProps> = ({
     });
   };
 
-  // Get session status icon
-  const getSessionStatusIcon = (session: Session): string => {
-    if (session.status === 'running') return '▶️';
-    if (session.status === 'completed') return '✅';
-    if (session.status === 'failed') return '❌';
-    return '⏸️';
+  // Session status icon, colored to match desktop status semantics
+  const getSessionStatusIcon = (session: Session): React.ReactNode => {
+    if (session.status === 'running')
+      return <PlayCircleOutlined style={{ color: token.colorPrimary }} />;
+    if (session.status === 'completed')
+      return <CheckCircleOutlined style={{ color: token.colorSuccess }} />;
+    if (session.status === 'failed')
+      return <CloseCircleOutlined style={{ color: token.colorError }} />;
+    return <PauseCircleOutlined style={{ color: token.colorTextTertiary }} />;
   };
 
   const boards = mapToArray(boardById);
@@ -170,7 +181,7 @@ export const MobileNavTree: React.FC<MobileNavTreeProps> = ({
                             }}
                           >
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                              <span>🌳</span>
+                              <BranchesOutlined />
                               <Text strong>{branch.name}</Text>
                             </div>
                             <Text type="secondary" style={{ fontSize: 12, paddingLeft: 28 }}>

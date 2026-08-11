@@ -5,12 +5,17 @@ import type {
   CardType,
   CardWithType,
 } from '@agor-live/client';
-import { DeleteOutlined, EditOutlined, PlusOutlined, PushpinFilled } from '@ant-design/icons';
+import {
+  DeleteOutlined,
+  EditOutlined,
+  FileTextOutlined,
+  PlusOutlined,
+  PushpinFilled,
+} from '@ant-design/icons';
 import {
   Button,
   ColorPicker,
   Empty,
-  Flex,
   Form,
   Input,
   Layout,
@@ -26,7 +31,6 @@ import { mapToArray } from '@/utils/mapHelpers';
 import { useThemedMessage } from '@/utils/message';
 import { filterBySettingsSearch } from '@/utils/settingsSearch';
 import CardModal from '../CardModal/CardModal';
-import { FormEmojiPickerInput } from '../EmojiPickerInput';
 import { HighlightMatch } from '../HighlightMatch';
 import { JSONEditor, validateJSON } from '../JSONEditor';
 import { MetaRow } from '../MetaRow';
@@ -74,7 +78,6 @@ export const CardsTable: React.FC<CardsTableProps> = ({
     () =>
       filterBySettingsSearch(cardTypes, typeSearchTerm, [
         (cardType) => cardType.name,
-        (cardType) => cardType.emoji,
         (cardType) => JSON.stringify(cardType.json_schema ?? {}),
       ]),
     [cardTypes, typeSearchTerm]
@@ -130,7 +133,6 @@ export const CardsTable: React.FC<CardsTableProps> = ({
           : (values.color?.toHexString?.() ?? undefined);
       await client.service('card-types').create({
         name: values.name,
-        emoji: values.emoji || undefined,
         color: colorValue || undefined,
         json_schema: values.json_schema ? JSON.parse(values.json_schema) : undefined,
       });
@@ -153,7 +155,6 @@ export const CardsTable: React.FC<CardsTableProps> = ({
           : (values.color?.toHexString?.() ?? undefined);
       await client.service('card-types').patch(editingType.card_type_id, {
         name: values.name,
-        emoji: values.emoji || undefined,
         color: colorValue || undefined,
         json_schema: values.json_schema ? JSON.parse(values.json_schema) : undefined,
       });
@@ -182,7 +183,6 @@ export const CardsTable: React.FC<CardsTableProps> = ({
     setEditingType(ct);
     form.setFieldsValue({
       name: ct.name,
-      emoji: ct.emoji,
       color: ct.color,
       json_schema: ct.json_schema ? JSON.stringify(ct.json_schema, null, 2) : '',
     });
@@ -197,7 +197,6 @@ export const CardsTable: React.FC<CardsTableProps> = ({
       key: 'title',
       render: (title: string, record: CardWithType) => (
         <Space>
-          {record.effective_emoji && <span>{record.effective_emoji}</span>}
           <Typography.Text>
             <HighlightMatch text={title} query={cardSearchTerm} />
           </Typography.Text>
@@ -259,14 +258,9 @@ export const CardsTable: React.FC<CardsTableProps> = ({
   const typeFormContent = (
     <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
       <Form.Item label="Name" style={{ marginBottom: 24 }}>
-        <Flex gap={8}>
-          <Form.Item name="emoji" noStyle>
-            <FormEmojiPickerInput form={form} fieldName="emoji" defaultEmoji="📋" />
-          </Form.Item>
-          <Form.Item name="name" noStyle rules={[{ required: true, message: 'Name is required' }]}>
-            <Input placeholder="e.g. Support Ticket" style={{ flex: 1 }} />
-          </Form.Item>
-        </Flex>
+        <Form.Item name="name" noStyle rules={[{ required: true, message: 'Name is required' }]}>
+          <Input placeholder="e.g. Support Ticket" />
+        </Form.Item>
       </Form.Item>
       <Form.Item name="color" label="Color">
         <ColorPicker showText format="hex" allowClear />
@@ -391,7 +385,7 @@ export const CardsTable: React.FC<CardsTableProps> = ({
                 }}
               >
                 <MetaRow
-                  avatar={<span style={{ fontSize: 18 }}>{ct.emoji || '📋'}</span>}
+                  avatar={<FileTextOutlined style={{ fontSize: 16 }} />}
                   title={
                     <Typography.Text style={{ fontSize: 13 }} ellipsis>
                       <HighlightMatch text={ct.name} query={typeSearchTerm} />
@@ -444,7 +438,7 @@ export const CardsTable: React.FC<CardsTableProps> = ({
                 }}
               >
                 <Space>
-                  <span style={{ fontSize: 20 }}>{selectedType.emoji || '📋'}</span>
+                  <FileTextOutlined style={{ fontSize: 18 }} />
                   <Typography.Title level={5} style={{ margin: 0 }}>
                     {selectedType.name}
                   </Typography.Title>

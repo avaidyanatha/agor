@@ -29,7 +29,7 @@ function makeBranch(overrides: Partial<Branch> = {}): Branch {
 }
 
 describe('createTeammateBranch', () => {
-  it('stores teammate identity, including emoji, in the initial branch create payload', async () => {
+  it('stores teammate identity in the initial branch create payload', async () => {
     const repo = makeRepo();
     const branch = makeBranch({ board_id: 'board-1' });
     const onCreateBranch = vi.fn().mockResolvedValue(branch);
@@ -54,7 +54,6 @@ describe('createTeammateBranch', () => {
     await createTeammateBranch(
       {
         displayName: 'Pineapple Helper',
-        emoji: '🍍',
         description: 'Helps with pineapple tasks.',
         repoId: repo.repo_id,
       },
@@ -75,7 +74,6 @@ describe('createTeammateBranch', () => {
           teammate: expect.objectContaining({
             kind: 'teammate',
             displayName: 'Pineapple Helper',
-            emoji: '🍍',
           }),
         },
         notes: 'Helps with pineapple tasks.',
@@ -83,12 +81,10 @@ describe('createTeammateBranch', () => {
     );
     expect(boardsService.create).toHaveBeenCalledWith({
       name: "Pineapple Helper's Board",
-      icon: '🍍',
     });
     expect(boardsService.ensureTeammateWelcomeNote).toHaveBeenCalledWith({
       boardId: 'board-1',
       teammateName: 'Pineapple Helper',
-      teammateEmoji: '🍍',
     });
     expect(boardsService.setPrimaryTeammate).toHaveBeenCalledWith({
       boardId: 'board-1',

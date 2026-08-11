@@ -1006,7 +1006,6 @@ export const App: React.FC<AppProps> = ({
       {
         displayName: result.displayName,
         description: result.description,
-        emoji: result.emoji,
         repoId,
         branchName: result.branchName,
         sourceBranch: result.sourceBranch,
@@ -1027,7 +1026,6 @@ export const App: React.FC<AppProps> = ({
       title: buildTeammateOnboardingSessionTitle(result),
       initialPrompt: buildTeammateBootstrapPrompt({
         displayName: result.displayName,
-        emoji: result.emoji,
         description: result.description,
         userName: user?.name,
         userEmail: user?.email,

@@ -176,7 +176,7 @@ export function OnboardingBanners({
     case BannerDecision.NoAi:
       return (
         <AmberBanner
-          message="⚡ No AI connected - sessions will open but nothing will run."
+          message="No AI connected - sessions will open but nothing will run."
           buttonLabel="Connect AI"
           onClick={() =>
             credentialOwner === 'tenant' && canManageWorkspaceCredentials

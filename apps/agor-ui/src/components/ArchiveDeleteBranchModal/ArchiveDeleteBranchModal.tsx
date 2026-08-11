@@ -157,7 +157,7 @@ export const ArchiveDeleteBranchModal: React.FC<ArchiveDeleteBranchModalProps> =
                 <Text>• Links to issues/PRs will be removed forever</Text>
                 <Text>• This action cannot be undone</Text>
                 <Text strong style={{ marginTop: 8, display: 'block' }}>
-                  💡 Consider archiving instead - keeps data for history but hides from board
+                  Consider archiving instead - keeps data for history but hides from board
                 </Text>
               </Space>
             }
