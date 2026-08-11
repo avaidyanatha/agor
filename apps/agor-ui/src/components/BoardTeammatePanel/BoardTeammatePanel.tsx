@@ -4,14 +4,12 @@ import { RightOutlined, RobotOutlined } from '@ant-design/icons';
 import {
   Alert,
   App as AntApp,
-  Badge,
   Button,
   Empty,
   Select,
   Skeleton,
   Space,
   Spin,
-  Tabs,
   Tooltip,
   Typography,
   theme,
@@ -183,11 +181,14 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
     };
   }, [deferSessionDetails, hydrateDeferredDetails, sessionDetailsHydrated]);
 
-  const setActiveTab = (tab: BoardTeammatePanelTab) => {
-    hydrateDeferredDetails();
-    setUncontrolledActiveTab(tab);
-    onTabChange?.(tab);
-  };
+  // Section switching lives in the rail (App-controlled activeTab). Force
+  // hydration as soon as a data-heavy section is shown so the user never
+  // waits on the idle-callback path after an explicit click.
+  useEffect(() => {
+    if (activeTab === 'all-sessions' || activeTab === 'all-branches') {
+      hydrateDeferredDetails();
+    }
+  }, [activeTab, hydrateDeferredDetails]);
 
   // Derive board comments only when the comments tab is actually visible. The
   // default teammate tab does not need to scan the global comment map during
@@ -514,123 +515,116 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
     );
   })();
 
+  const sectionTitles: Record<BoardTeammatePanelTab, string> = {
+    teammate: 'Teammate',
+    'all-sessions': 'Sessions',
+    'all-branches': 'Branches',
+    comments: 'Comments',
+  };
+
+  const noBoard = <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No board selected" />;
+
+  const sectionContent = (() => {
+    switch (activeTab) {
+      case 'teammate':
+        return <div style={{ height: '100%', overflow: 'auto' }}>{teammateContent}</div>;
+      case 'all-sessions':
+        return board ? (
+          <div style={{ height: '100%', overflow: 'auto' }}>
+            {sessionDetailsHydrated ? (
+              <BoardSessionList
+                board={board}
+                currentBoardId={board.board_id}
+                branchById={branchById}
+                repoById={repoById}
+                sessionsByBranch={sessionsByBranch}
+                onSessionClick={onSessionClick}
+              />
+            ) : (
+              <div style={{ padding: 16 }}>
+                <Skeleton active paragraph={{ rows: 4 }} title={false} />
+              </div>
+            )}
+          </div>
+        ) : (
+          noBoard
+        );
+      case 'all-branches':
+        return board ? (
+          <div style={{ height: '100%', overflow: 'auto' }}>
+            {sessionDetailsHydrated ? (
+              <BoardBranchList board={board} repoById={repoById} client={client} />
+            ) : (
+              <div style={{ padding: 16 }}>
+                <Skeleton active paragraph={{ rows: 4 }} title={false} />
+              </div>
+            )}
+          </div>
+        ) : (
+          noBoard
+        );
+      case 'comments':
+        return board ? (
+          <div style={{ height: '100%' }}>
+            <CommentsPanel
+              client={client}
+              boardId={board.board_id}
+              comments={comments}
+              userById={userById}
+              currentUserId={currentUserId || 'unknown'}
+              boardObjects={boardObjects}
+              branchById={branchById}
+              onSendComment={(content) => onSendComment?.(content)}
+              onReplyComment={onReplyComment}
+              onResolveComment={onResolveComment}
+              onToggleReaction={onToggleReaction}
+              onDeleteComment={onDeleteComment}
+              hoveredCommentId={hoveredCommentId}
+              selectedCommentId={selectedCommentId}
+            />
+          </div>
+        ) : (
+          noBoard
+        );
+    }
+  })();
+
+  // No tab bar: the persistent icon rail (TeammatePanelRail, rendered by App
+  // beside this panel) owns section switching. The panel is content plus a
+  // slim title header.
   return (
     <div
       style={{
         height: '100%',
         background: token.colorBgContainer,
-        borderRight: `1px solid ${token.colorBorderSecondary}`,
         overflow: 'hidden',
+        display: 'flex',
+        flexDirection: 'column',
       }}
     >
-      <Tabs
-        activeKey={activeTab}
-        onChange={(key) => setActiveTab(key as BoardTeammatePanelTab)}
-        items={[
-          {
-            key: 'teammate',
-            label: 'Teammate',
-            children: (
-              <div style={{ height: 'calc(100vh - 112px)', overflow: 'auto' }}>
-                {teammateContent}
-              </div>
-            ),
-          },
-          {
-            key: 'all-sessions',
-            label: 'Sessions',
-            children: board ? (
-              <div style={{ height: 'calc(100vh - 112px)', overflow: 'auto' }}>
-                {sessionDetailsHydrated ? (
-                  <BoardSessionList
-                    board={board}
-                    currentBoardId={board.board_id}
-                    branchById={branchById}
-                    repoById={repoById}
-                    sessionsByBranch={sessionsByBranch}
-                    onSessionClick={onSessionClick}
-                  />
-                ) : (
-                  <div style={{ padding: 16 }}>
-                    <Skeleton active paragraph={{ rows: 4 }} title={false} />
-                  </div>
-                )}
-              </div>
-            ) : (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No board selected" />
-            ),
-          },
-          {
-            key: 'all-branches',
-            label: 'Branches',
-            children: board ? (
-              <div style={{ height: 'calc(100vh - 112px)', overflow: 'auto' }}>
-                {sessionDetailsHydrated ? (
-                  <BoardBranchList board={board} repoById={repoById} client={client} />
-                ) : (
-                  <div style={{ padding: 16 }}>
-                    <Skeleton active paragraph={{ rows: 4 }} title={false} />
-                  </div>
-                )}
-              </div>
-            ) : (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No board selected" />
-            ),
-          },
-          {
-            key: 'comments',
-            label: (
-              <Badge
-                count={unreadCommentsCount}
-                size="small"
-                offset={[8, 0]}
-                style={{
-                  backgroundColor: hasUserMentions ? token.colorError : token.colorPrimaryBgHover,
-                }}
-              >
-                <span>Comments</span>
-              </Badge>
-            ),
-            children: board ? (
-              <div style={{ height: 'calc(100vh - 112px)' }}>
-                <CommentsPanel
-                  client={client}
-                  boardId={board.board_id}
-                  comments={comments}
-                  userById={userById}
-                  currentUserId={currentUserId || 'unknown'}
-                  boardObjects={boardObjects}
-                  branchById={branchById}
-                  onSendComment={(content) => onSendComment?.(content)}
-                  onReplyComment={onReplyComment}
-                  onResolveComment={onResolveComment}
-                  onToggleReaction={onToggleReaction}
-                  onDeleteComment={onDeleteComment}
-                  hoveredCommentId={hoveredCommentId}
-                  selectedCommentId={selectedCommentId}
-                />
-              </div>
-            ) : (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No board selected" />
-            ),
-          },
-        ]}
-        style={{ height: '100%' }}
-        tabBarStyle={{ margin: 0, padding: '0 12px' }}
-        tabBarExtraContent={{
-          right: onCollapse ? (
-            <Tooltip title="Collapse panel" placement="bottom">
-              <Button
-                type="text"
-                size="small"
-                icon={<RightOutlined style={{ fontSize: 11 }} />}
-                onClick={onCollapse}
-                style={{ marginRight: 4 }}
-              />
-            </Tooltip>
-          ) : undefined,
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '8px 12px',
+          borderBottom: `1px solid ${token.colorBorderSecondary}`,
+          flexShrink: 0,
         }}
-      />
+      >
+        <Typography.Text strong>{sectionTitles[activeTab]}</Typography.Text>
+        {onCollapse && (
+          <Tooltip title="Collapse panel" placement="bottom">
+            <Button
+              type="text"
+              size="small"
+              icon={<RightOutlined style={{ fontSize: 11 }} />}
+              onClick={onCollapse}
+            />
+          </Tooltip>
+        )}
+      </div>
+      <div style={{ flex: 1, minHeight: 0 }}>{sectionContent}</div>
     </div>
   );
 };

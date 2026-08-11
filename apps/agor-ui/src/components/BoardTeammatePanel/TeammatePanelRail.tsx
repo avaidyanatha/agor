@@ -24,6 +24,8 @@ const RAIL_ITEMS: RailItem[] = [
 
 export interface TeammatePanelRailProps {
   onSelectTab: (tab: BoardTeammatePanelTab) => void;
+  /** Section currently shown in the expanded panel; null when collapsed. */
+  activeTab?: BoardTeammatePanelTab | null;
   unreadCommentsCount?: number;
   hasUserMentions?: boolean;
 }
@@ -33,6 +35,7 @@ export interface TeammatePanelRailProps {
 // low-contrast circle floating at the panel edge.
 const TeammatePanelRailComponent: React.FC<TeammatePanelRailProps> = ({
   onSelectTab,
+  activeTab = null,
   unreadCommentsCount = 0,
   hasUserMentions = false,
 }) => {
@@ -53,6 +56,7 @@ const TeammatePanelRailComponent: React.FC<TeammatePanelRailProps> = ({
       }}
     >
       {RAIL_ITEMS.map((item) => {
+        const isActive = item.key === activeTab;
         const button = (
           <button
             key={item.key}
@@ -69,15 +73,17 @@ const TeammatePanelRailComponent: React.FC<TeammatePanelRailProps> = ({
               padding: '8px 2px',
               border: 0,
               borderRadius: token.borderRadius,
-              background: 'transparent',
-              color: token.colorText,
+              background: isActive ? token.colorFillSecondary : 'transparent',
+              color: isActive ? token.colorPrimary : token.colorText,
               cursor: 'pointer',
             }}
             onMouseEnter={(e) => {
               (e.currentTarget as HTMLButtonElement).style.background = token.colorFillTertiary;
             }}
             onMouseLeave={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
+              (e.currentTarget as HTMLButtonElement).style.background = isActive
+                ? token.colorFillSecondary
+                : 'transparent';
             }}
           >
             <span style={{ fontSize: 18, lineHeight: 1 }}>{item.icon}</span>
