@@ -62,7 +62,27 @@ const TeammatePanelRailComponent: React.FC<TeammatePanelRailProps> = ({
         // Light-touch states: hover tints only a compact chip behind the
         // icon; active swaps the icon to the accent color and lights a 2px
         // bar on the rail's outer edge. No full-button fill.
-        const button = (
+        const iconChip = (
+          <span
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: 32,
+              height: 32,
+              borderRadius: 8,
+              fontSize: 18,
+              lineHeight: 1,
+              background: isHovered ? token.colorFillTertiary : 'transparent',
+              color: isActive ? token.colorPrimary : 'inherit',
+              transition: 'background 0.15s',
+            }}
+          >
+            {item.icon}
+          </span>
+        );
+
+        return (
           <button
             key={item.key}
             type="button"
@@ -85,23 +105,22 @@ const TeammatePanelRailComponent: React.FC<TeammatePanelRailProps> = ({
               cursor: 'pointer',
             }}
           >
-            <span
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                width: 32,
-                height: 32,
-                borderRadius: 8,
-                fontSize: 18,
-                lineHeight: 1,
-                background: isHovered ? token.colorFillTertiary : 'transparent',
-                color: isActive ? token.colorPrimary : 'inherit',
-                transition: 'background 0.15s',
-              }}
-            >
-              {item.icon}
-            </span>
+            {/* Badge wraps only the icon chip so the button itself keeps the
+                full rail width — the edge indicator anchors to the rail edge,
+                not the badge wrapper's shrink-wrapped box. */}
+            {item.key === 'comments' ? (
+              <Badge
+                count={unreadCommentsCount}
+                offset={[-2, 4]}
+                style={{
+                  backgroundColor: hasUserMentions ? token.colorError : token.colorPrimaryBgHover,
+                }}
+              >
+                {iconChip}
+              </Badge>
+            ) : (
+              iconChip
+            )}
             <span
               style={{
                 fontSize: 10,
@@ -125,21 +144,6 @@ const TeammatePanelRailComponent: React.FC<TeammatePanelRailProps> = ({
               />
             )}
           </button>
-        );
-
-        if (item.key !== 'comments') return button;
-
-        return (
-          <Badge
-            key={item.key}
-            count={unreadCommentsCount}
-            offset={[-10, 10]}
-            style={{
-              backgroundColor: hasUserMentions ? token.colorError : token.colorPrimaryBgHover,
-            }}
-          >
-            {button}
-          </Badge>
         );
       })}
     </div>
