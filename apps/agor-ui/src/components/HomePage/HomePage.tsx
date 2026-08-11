@@ -15,14 +15,11 @@ import { selectBoardById } from '../../store/selectors';
 import { isDarkTheme } from '../../utils/theme';
 import { HomeBoardsSection } from './HomeBoardsSection';
 import { HomeSessionsSection } from './HomeSessionsSection';
-import { HomeStatsBar } from './HomeStatsBar';
 import { JumpBackInSection } from './JumpBackInSection';
 import { OnboardingCard } from './OnboardingCard';
 import type { HomePageProps } from './types';
 
 const { Content } = Layout;
-const { Text, Title } = Typography;
-
 const ONBOARDING_HIDDEN_KEY = 'agor:onboarding-card-hidden';
 
 // Direct map-value iteration with an early exit — avoids materializing an array
@@ -141,11 +138,6 @@ export const HomePage = memo(function HomePage(props: HomePageProps) {
     () => localStorage.getItem(ONBOARDING_HIDDEN_KEY) === 'true'
   );
 
-  const currentUserName = useAgorStore((s) =>
-    props.currentUserId ? s.userById.get(props.currentUserId)?.name : undefined
-  );
-  const username = currentUserName || 'there';
-
   const defaultBoardId = useMemo(() => {
     const firstRecent = (props.recentBoardIds ?? []).find(
       (id) => boardById.get(id)?.archived === false
@@ -203,24 +195,15 @@ export const HomePage = memo(function HomePage(props: HomePageProps) {
                 minHeight: 0,
               }}
             >
-              {/* Greeting */}
+              {/* Slim action row — boards and sessions are the page */}
               <header
                 style={{
                   display: 'flex',
-                  alignItems: 'flex-start',
-                  justifyContent: 'space-between',
-                  gap: 16,
-                  marginBottom: 24,
+                  alignItems: 'center',
+                  justifyContent: 'flex-end',
+                  marginBottom: 16,
                 }}
               >
-                <div>
-                  <Title level={5} style={{ margin: 0, fontWeight: 700 }}>
-                    Hi, {username}! 👋
-                  </Title>
-                  <Text type="secondary" style={{ fontSize: 14 }}>
-                    Here's an overview of your workspace.
-                  </Text>
-                </div>
                 <Dropdown
                   menu={{
                     items: NEW_MENU_ITEMS,
@@ -259,9 +242,6 @@ export const HomePage = memo(function HomePage(props: HomePageProps) {
                 currentUserId={props.currentUserId}
                 onSessionClick={props.onSessionClick}
               />
-
-              {/* Workspace stats */}
-              <HomeStatsBar currentUserId={props.currentUserId} />
 
               {/* My Sessions — flex: 1 fills remaining viewport height */}
               <HomeSessionsSection
